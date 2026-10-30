@@ -1,4 +1,4 @@
-﻿export type LoginEventType = 'login' | 'signup' | 'demo_access';
+export type LoginEventType = 'login' | 'signup' | 'demo_access';
 
 export interface LoginNotificationPayload {
   email: string;
@@ -7,13 +7,14 @@ export interface LoginNotificationPayload {
 }
 
 /**
- * Asynchronously triggers a non-blocking background notification to the admin
+ * Asynchronously triggers a notification to the admin
  * when a user logs in, signs up, or uses the demo fast-pass.
  *
- * Uses `keepalive: true` so the request completes even if the page immediately
- * navigates to /dashboard.
+ * Awaited before router.push so the browser doesn't abort the HTTP request
+ * during client-side navigation. Includes a 2.5s timeout fail-safe so users are
+ * never kept waiting.
  */
-export function triggerLoginNotification(payload: LoginNotificationPayload): void {
+export async function triggerLoginNotification(payload: LoginNotificationPayload): Promise<void> {
   if (typeof window === 'undefined') return;
 
   try {
@@ -25,17 +26,25 @@ export function triggerLoginNotification(payload: LoginNotificationPayload): voi
       userAgent,
     });
 
-    fetch('/api/auth/notify-login', {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+    const res = await fetch('/api/auth/notify-login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body,
-      keepalive: true,
-    }).catch((error) => {
-      console.warn('Login notification pipeline notice:', error);
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      console.warn('Login notification pipeline status:', res.status);
+    }
   } catch (err) {
-    console.warn('Failed to dispatch login notification:', err);
+    // Fail-safe: never block authentication even on network hitches
+    console.warn('Login notification dispatch note:', err);
   }
 }

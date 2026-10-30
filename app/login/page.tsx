@@ -69,7 +69,7 @@ function LoginForm() {
 
         if (error) throw error;
 
-        triggerLoginNotification({
+        await triggerLoginNotification({
           email: email.trim(),
           displayName: displayName.trim() || undefined,
           event: 'signup',
@@ -92,7 +92,7 @@ function LoginForm() {
 
         if (error) throw error;
 
-        triggerLoginNotification({
+        await triggerLoginNotification({
           email: email.trim(),
           event: 'login',
         });
@@ -165,7 +165,7 @@ function LoginForm() {
     }
   };
 
-  const handleInstantDemoLogin = () => {
+  const handleInstantDemoLogin = async () => {
     const demoEmail = email.trim() || 'student@lobex-study.internal';
     const demoName = displayName.trim() || 'Alex Rivera';
 
@@ -181,7 +181,7 @@ function LoginForm() {
       );
     }
 
-    triggerLoginNotification({
+    await triggerLoginNotification({
       email: demoEmail,
       displayName: demoName,
       event: 'demo_access',

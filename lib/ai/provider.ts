@@ -1,4 +1,11 @@
 import { ExplanationLevel, DifficultyLevel, QuizQuestion, Flashcard, DocumentSummary, BrainBlitzQuestion } from '@/types';
+import { extractTextFromPdfBase64 } from '@/lib/utils/pdfServerExtractor';
+import {
+  generateGroundedExamQuiz,
+  generateGroundedFlashcards,
+  generateGroundedBrainBlitz,
+  generateGroundedDocumentSummary,
+} from '@/lib/ai/semanticExamEngine';
 
 interface ChatHistoryItem {
   role: 'user' | 'assistant';
@@ -33,7 +40,7 @@ export const inMemoryReports: ReportedItem[] = [
   },
 ];
 
-const ACADEMIC_SYSTEM_PROMPT = `You are an expert academic tutor and exam preparation specialist.
+const ACADEMIC_SYSTEM_PROMPT = `You are a distinguished university professor and examination board author.
 Your primary objective is academic precision, conceptual clarity, and rigorous pedagogical accuracy.
 STRICT GUIDELINES:
 1. Provide direct, factual, and logically structured explanations.
@@ -59,8 +66,8 @@ async function callGemini(contents: any[], systemInstruction?: string): Promise<
     const payload: any = {
       contents,
       generationConfig: {
-        temperature: 0.3, // Lower temperature for academic precision and zero hallucination
-        maxOutputTokens: 2048,
+        temperature: 0.2, // Lower temperature for academic precision and zero hallucination
+        maxOutputTokens: 2500,
       },
     };
 
@@ -93,6 +100,49 @@ async function callGemini(contents: any[], systemInstruction?: string): Promise<
 }
 
 /**
+ * Call OpenAI-compatible LLM endpoint (OpenAI, Groq, DeepSeek, etc.)
+ */
+async function callOpenAiCompatible(
+  messages: Array<{ role: string; content: string }>,
+  jsonMode: boolean = false
+): Promise<string | null> {
+  const apiKey = process.env.LLM_API_KEY;
+  if (!apiKey) return null;
+
+  const model = process.env.LLM_MODEL || 'gpt-4o-mini';
+  const url = process.env.LLM_BASE_URL || 'https://api.openai.com/v1/chat/completions';
+
+  try {
+    const payload: any = {
+      model,
+      messages,
+      temperature: 0.2,
+      max_tokens: 2500,
+    };
+    if (jsonMode) {
+      payload.response_format = { type: 'json_object' };
+    }
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      return data.choices?.[0]?.message?.content || null;
+    }
+  } catch (err) {
+    console.warn('OpenAI compatible LLM fetch failed:', err);
+  }
+  return null;
+}
+
+/**
  * AI Concept Tutor & Q&A
  */
 export async function getAiTutorResponse(
@@ -120,39 +170,15 @@ export async function getAiTutorResponse(
   }
 
   // 2. Try alternative LLM (OpenAI compatible)
-  const apiKey = process.env.LLM_API_KEY;
-  if (apiKey) {
-    try {
-      const model = process.env.LLM_MODEL || 'gpt-4o-mini';
-      const messages = [
-        { role: 'system', content: `${ACADEMIC_SYSTEM_PROMPT}\nTarget explanation depth: ${level}` },
-        ...history.slice(-8).map((h) => ({ role: h.role, content: h.content })),
-        { role: 'user', content: message },
-      ];
-
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 0.3,
-          max_tokens: 1200,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const output = data.choices?.[0]?.message?.content;
-        if (output && typeof output === 'string') {
-          return { text: output.trim(), source: 'llm' };
-        }
-      }
-    } catch (err) {
-      console.warn('Live LLM fetch failed, using academic engine fallback:', err);
+  if (process.env.LLM_API_KEY) {
+    const messages = [
+      { role: 'system', content: `${ACADEMIC_SYSTEM_PROMPT}\nTarget explanation depth: ${level}` },
+      ...history.slice(-8).map((h) => ({ role: h.role, content: h.content })),
+      { role: 'user', content: message },
+    ];
+    const llmOutput = await callOpenAiCompatible(messages);
+    if (llmOutput) {
+      return { text: llmOutput.trim(), source: 'llm' };
     }
   }
 
@@ -189,6 +215,29 @@ export async function getConceptExplanation(
 }
 
 /**
+ * Helper to parse document summary JSON safely
+ */
+function parseSummaryJson(rawText: string, fileName: string, fallbackNotes: string): DocumentSummary | null {
+  try {
+    const clean = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    if (parsed.executiveSummary && Array.isArray(parsed.keyConcepts)) {
+      return {
+        title: parsed.title || fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' '),
+        executiveSummary: parsed.executiveSummary,
+        keyConcepts: parsed.keyConcepts,
+        examTakeaways: Array.isArray(parsed.examTakeaways) ? parsed.examTakeaways : [],
+        sourceNotes: fallbackNotes.slice(0, 3000),
+        source: 'gemini',
+      };
+    }
+  } catch (e) {
+    console.warn('Failed to parse summary JSON:', e);
+  }
+  return null;
+}
+
+/**
  * AI Document & Notes Summarizer (Supports PDF base64 & Text)
  */
 export async function summarizeDocument(params: {
@@ -198,10 +247,17 @@ export async function summarizeDocument(params: {
 }): Promise<DocumentSummary> {
   const { text = '', pdfBase64, fileName = 'Document' } = params;
 
-  // 1. Try Gemini with Multimodal PDF or Text
-  if (process.env.GEMINI_API_KEY) {
-    const parts: any[] = [];
-    const prompt = `Analyze this academic learning material (${fileName}) and provide a comprehensive, rigorous study summary.
+  let effectiveText = text ? text.trim() : '';
+  if (!effectiveText && pdfBase64) {
+    try {
+      const extracted = await extractTextFromPdfBase64(pdfBase64);
+      if (extracted) effectiveText = extracted;
+    } catch (e) {
+      console.warn('PDF text extraction error in summarizeDocument:', e);
+    }
+  }
+
+  const prompt = `Analyze this academic learning material (${fileName}) and provide a comprehensive, rigorous study summary.
 Format your output strictly as valid JSON with this exact structure:
 {
   "title": "Clear concise subject title",
@@ -219,42 +275,75 @@ Format your output strictly as valid JSON with this exact structure:
   ]
 }`;
 
-    parts.push({ text: prompt });
-
-    if (pdfBase64) {
+  // 1. Try Gemini
+  if (process.env.GEMINI_API_KEY) {
+    const parts: any[] = [{ text: prompt }];
+    if (pdfBase64 && !effectiveText) {
       parts.push({
         inlineData: {
           mimeType: 'application/pdf',
           data: pdfBase64,
         },
       });
-    } else if (text) {
-      parts.push({ text: `Document content:\n"""\n${text.slice(0, 40000)}\n"""` });
+    } else if (effectiveText) {
+      parts.push({ text: `Document content:\n"""\n${effectiveText.slice(0, 40000)}\n"""` });
     }
 
     const geminiRes = await callGemini([{ role: 'user', parts }], ACADEMIC_SYSTEM_PROMPT);
     if (geminiRes) {
-      try {
-        const cleanJson = geminiRes.replace(/```json/g, '').replace(/```/g, '').trim();
-        const parsed = JSON.parse(cleanJson);
-        if (parsed.executiveSummary && Array.isArray(parsed.keyConcepts)) {
-          return {
-            title: parsed.title || fileName.replace(/\.[^/.]+$/, ''),
-            executiveSummary: parsed.executiveSummary,
-            keyConcepts: parsed.keyConcepts,
-            examTakeaways: parsed.examTakeaways || [],
-            sourceNotes: text.slice(0, 3000),
-            source: 'gemini',
-          };
-        }
-      } catch (e) {
-        console.warn('Failed to parse Gemini summary JSON, using fallback parser:', e);
-      }
+      const parsed = parseSummaryJson(geminiRes, fileName, effectiveText);
+      if (parsed) return parsed;
     }
   }
 
-  // Fallback Academic Summarizer
-  return generateFallbackDocumentSummary(text, fileName);
+  // 2. Try alternative LLM
+  if (process.env.LLM_API_KEY && effectiveText) {
+    const messages = [
+      { role: 'system', content: ACADEMIC_SYSTEM_PROMPT },
+      { role: 'user', content: `${prompt}\n\nDocument content:\n"""\n${effectiveText.slice(0, 30000)}\n"""` },
+    ];
+    const llmRes = await callOpenAiCompatible(messages);
+    if (llmRes) {
+      const parsed = parseSummaryJson(llmRes, fileName, effectiveText);
+      if (parsed) return parsed;
+    }
+  }
+
+  // 3. Fallback Grounded Semantic Summarizer
+  return generateGroundedDocumentSummary(effectiveText, fileName);
+}
+
+/**
+ * Helper to parse quiz questions JSON safely
+ */
+function parseQuizJson(rawText: string, count: number): QuizQuestion[] | null {
+  try {
+    const clean = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const list = JSON.parse(clean);
+    const parsedList = Array.isArray(list) ? list : list.questions || list.quiz || list.items;
+    if (Array.isArray(parsedList) && parsedList.length > 0) {
+      return parsedList.slice(0, count).map((q: any, i: number) => ({
+        id: q.id || `q-${i + 1}-${Date.now()}`,
+        question: String(q.question || q.prompt),
+        options: [
+          String(q.options?.[0] || 'Option A'),
+          String(q.options?.[1] || 'Option B'),
+          String(q.options?.[2] || 'Option C'),
+          String(q.options?.[3] || 'Option D'),
+        ] as [string, string, string, string],
+        correctAnswer:
+          typeof q.correctAnswer === 'number' && q.correctAnswer >= 0 && q.correctAnswer < 4
+            ? q.correctAnswer
+            : typeof q.correctIndex === 'number' && q.correctIndex >= 0 && q.correctIndex < 4
+            ? q.correctIndex
+            : 0,
+        explanation: String(q.explanation || 'Accurate answer derived from curriculum material.'),
+      }));
+    }
+  } catch (e) {
+    console.warn('Failed to parse quiz JSON:', e);
+  }
+  return null;
 }
 
 /**
@@ -269,24 +358,45 @@ export async function generateQuizQuestions(
 ): Promise<QuizQuestion[]> {
   const count = Math.max(1, Math.min(questionCount, 15));
 
-  // Try Gemini
-  if (process.env.GEMINI_API_KEY) {
-    const prompt = `Generate exactly ${count} multiple-choice examination questions on the topic "${topic}" with difficulty "${difficulty}".
-${notes ? `Focus strictly on this course material/notes:\n"""\n${notes.slice(0, 20000)}\n"""\n` : ''}
-${fileData?.fileName ? `Ground questions directly in the attached learning material (${fileData.fileName}). Ensure answers are scientifically and academically factual with zero generic jargon.` : ''}
+  // Extract text from attached PDF if provided
+  let effectiveNotes = notes ? notes.trim() : '';
+  if (fileData?.base64 && (fileData.mimeType === 'application/pdf' || fileData.fileName?.toLowerCase().endsWith('.pdf'))) {
+    try {
+      const extracted = await extractTextFromPdfBase64(fileData.base64);
+      if (extracted) {
+        effectiveNotes = effectiveNotes ? `${effectiveNotes}\n\n${extracted}` : extracted;
+      }
+    } catch (err) {
+      console.warn('PDF extraction failed in generateQuizQuestions:', err);
+    }
+  }
+
+  const prompt = `You are a university professor and senior examination author.
+Generate exactly ${count} rigorous, authentic examination questions based strictly on the provided study material on "${topic}" (difficulty: "${difficulty}").
+
+STRICT EXAMINATION REQUIREMENTS:
+1. Academic Grounding: Every question stem must test a concrete definition, key formula, causal mechanism, specific stage, or critical distinction from the text.
+2. NO GENERIC JARGON: Strictly avoid abstract fillers (e.g. "What is the precise scientific definition...", "Which variable limits equilibrium..."). Ask actual, direct, syllabus-grounded questions.
+3. Plausible Distractors: All 4 options must be distinct, plausible academic answers (terms, definitions, or mechanisms from the same subject area).
+4. Explanations: The explanation must cite the specific reason or source fact confirming why the correct answer is valid.
+
+${effectiveNotes ? `Study Material / Notes:\n"""\n${effectiveNotes.slice(0, 30000)}\n"""\n` : ''}
+
 Return ONLY valid JSON matching this schema:
 [
   {
     "id": "q1",
-    "question": "Clear, precise academic question stem",
-    "options": ["Plausible option A", "Plausible option B", "Plausible option C", "Plausible option D"],
+    "question": "Direct academic question stem?",
+    "options": ["Option A", "Option B", "Option C", "Option D"],
     "correctAnswer": 0,
-    "explanation": "Direct explanation of why the correct option is scientifically/academically valid and why distractors are invalid."
+    "explanation": "Detailed rationale quoting or referencing the material."
   }
 ]`;
 
+  // 1. Try Gemini
+  if (process.env.GEMINI_API_KEY) {
     const parts: any[] = [{ text: prompt }];
-    if (fileData?.base64 && fileData?.mimeType) {
+    if (fileData?.base64 && fileData?.mimeType && !effectiveNotes) {
       parts.push({
         inlineData: {
           mimeType: fileData.mimeType,
@@ -297,32 +407,49 @@ Return ONLY valid JSON matching this schema:
 
     const resText = await callGemini([{ role: 'user', parts }], ACADEMIC_SYSTEM_PROMPT);
     if (resText) {
-      try {
-        const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
-        const list = JSON.parse(clean);
-        const parsedList = Array.isArray(list) ? list : list.questions || list.quiz;
-        if (Array.isArray(parsedList) && parsedList.length > 0) {
-          return parsedList.slice(0, count).map((q: any, i: number) => ({
-            id: q.id || `q-${i + 1}-${Date.now()}`,
-            question: String(q.question),
-            options: [
-              String(q.options?.[0] || 'Option A'),
-              String(q.options?.[1] || 'Option B'),
-              String(q.options?.[2] || 'Option C'),
-              String(q.options?.[3] || 'Option D'),
-            ] as [string, string, string, string],
-            correctAnswer: typeof q.correctAnswer === 'number' && q.correctAnswer >= 0 && q.correctAnswer < 4 ? q.correctAnswer : 0,
-            explanation: String(q.explanation || 'Accurate answer verified by academic curriculum.'),
-          }));
-        }
-      } catch (e) {
-        console.warn('Gemini quiz parse error:', e);
-      }
+      const parsed = parseQuizJson(resText, count);
+      if (parsed) return parsed;
     }
   }
 
-  // Fallback Quiz
-  return generateAccurateFallbackQuiz(topic, notes, count, difficulty);
+  // 2. Try alternative LLM
+  if (process.env.LLM_API_KEY) {
+    const messages = [
+      { role: 'system', content: ACADEMIC_SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ];
+    const llmRes = await callOpenAiCompatible(messages);
+    if (llmRes) {
+      const parsed = parseQuizJson(llmRes, count);
+      if (parsed) return parsed;
+    }
+  }
+
+  // 3. Grounded University Exam Engine (Zero template jargon, genuine questions from their material)
+  return generateGroundedExamQuiz(topic, effectiveNotes, count, difficulty);
+}
+
+/**
+ * Helper to parse flashcards JSON safely
+ */
+function parseFlashcardsJson(rawText: string, safeCount: number, topic: string): Flashcard[] | null {
+  try {
+    const clean = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(clean);
+    const list = Array.isArray(parsed) ? parsed : parsed.flashcards || parsed.cards;
+    if (Array.isArray(list) && list.length > 0) {
+      return list.slice(0, safeCount).map((item: any, i: number) => ({
+        id: `fc-${Date.now()}-${i}`,
+        front: String(item.front || `Concept ${i + 1}`),
+        back: String(item.back || `Definition for ${topic}`),
+        position: i,
+        known: false,
+      }));
+    }
+  } catch (e) {
+    console.warn('Failed to parse flashcards JSON:', e);
+  }
+  return null;
 }
 
 /**
@@ -334,13 +461,23 @@ export async function generateFlashcards(
   count: number = 6,
   fileData?: { base64: string; mimeType: string; fileName?: string }
 ): Promise<Flashcard[]> {
-  const safeCount = Math.max(1, Math.min(count, 12));
+  const safeCount = Math.max(1, Math.min(count, 15));
 
-  // Try Gemini
-  if (process.env.GEMINI_API_KEY) {
-    const prompt = `Generate exactly ${safeCount} concise, high-yield academic flashcards from "${topic}".
-${notes ? `Based strictly on this course material/notes:\n"""\n${notes.slice(0, 20000)}\n"""\n` : ''}
-${fileData?.fileName ? `Synthesize key terms and textbook definitions directly from the attached document (${fileData.fileName}). Provide accurate definitions, exact equations, and zero jargon.` : ''}
+  let effectiveNotes = notes ? notes.trim() : '';
+  if (fileData?.base64 && (fileData.mimeType === 'application/pdf' || fileData.fileName?.toLowerCase().endsWith('.pdf'))) {
+    try {
+      const extracted = await extractTextFromPdfBase64(fileData.base64);
+      if (extracted) {
+        effectiveNotes = effectiveNotes ? `${effectiveNotes}\n\n${extracted}` : extracted;
+      }
+    } catch (err) {
+      console.warn('PDF extraction failed in generateFlashcards:', err);
+    }
+  }
+
+  const prompt = `Generate exactly ${safeCount} concise, high-yield academic flashcards from "${topic}".
+${effectiveNotes ? `Based strictly on this course material/notes:\n"""\n${effectiveNotes.slice(0, 25000)}\n"""\n` : ''}
+Synthesize key terms and textbook definitions directly from the document. Provide accurate definitions, exact equations, and zero jargon.
 Return ONLY valid JSON array:
 [
   {
@@ -349,8 +486,10 @@ Return ONLY valid JSON array:
   }
 ]`;
 
+  // 1. Try Gemini
+  if (process.env.GEMINI_API_KEY) {
     const parts: any[] = [{ text: prompt }];
-    if (fileData?.base64 && fileData?.mimeType) {
+    if (fileData?.base64 && fileData?.mimeType && !effectiveNotes) {
       parts.push({
         inlineData: {
           mimeType: fileData.mimeType,
@@ -361,26 +500,59 @@ Return ONLY valid JSON array:
 
     const resText = await callGemini([{ role: 'user', parts }], ACADEMIC_SYSTEM_PROMPT);
     if (resText) {
-      try {
-        const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
-        const parsed = JSON.parse(clean);
-        const list = Array.isArray(parsed) ? parsed : parsed.flashcards || parsed.cards;
-        if (Array.isArray(list) && list.length > 0) {
-          return list.slice(0, safeCount).map((item: any, i: number) => ({
-            id: `fc-${Date.now()}-${i}`,
-            front: String(item.front || `Concept ${i + 1}`),
-            back: String(item.back || `Definition for ${topic}`),
-            position: i,
-            known: false,
-          }));
-        }
-      } catch (e) {
-        console.warn('Gemini flashcards parse error:', e);
-      }
+      const parsed = parseFlashcardsJson(resText, safeCount, topic);
+      if (parsed) return parsed;
     }
   }
 
-  return generateAccurateFallbackFlashcards(topic, notes, safeCount);
+  // 2. Try alternative LLM
+  if (process.env.LLM_API_KEY) {
+    const messages = [
+      { role: 'system', content: ACADEMIC_SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ];
+    const llmRes = await callOpenAiCompatible(messages);
+    if (llmRes) {
+      const parsed = parseFlashcardsJson(llmRes, safeCount, topic);
+      if (parsed) return parsed;
+    }
+  }
+
+  // 3. Grounded Flashcards from document facts
+  return generateGroundedFlashcards(topic, effectiveNotes, safeCount);
+}
+
+/**
+ * Helper to parse Brain Blitz questions JSON safely
+ */
+function parseBrainBlitzJson(rawText: string, safeCount: number, topicPrompt: string): BrainBlitzQuestion[] | null {
+  try {
+    const clean = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const list = JSON.parse(clean);
+    const parsedList = Array.isArray(list) ? list : list.questions || list.quiz || list.items;
+    if (Array.isArray(parsedList) && parsedList.length > 0) {
+      return parsedList.slice(0, safeCount).map((q: any, i: number) => ({
+        id: q.id || `bb-custom-${i + 1}-${Date.now()}`,
+        prompt: String(q.prompt || q.question),
+        options: [
+          String(q.options?.[0] || 'Option A'),
+          String(q.options?.[1] || 'Option B'),
+          String(q.options?.[2] || 'Option C'),
+          String(q.options?.[3] || 'Option D'),
+        ] as [string, string, string, string],
+        correctIndex:
+          typeof q.correctIndex === 'number' && q.correctIndex >= 0 && q.correctIndex < 4
+            ? q.correctIndex
+            : typeof q.correctAnswer === 'number' && q.correctAnswer >= 0 && q.correctAnswer < 4
+            ? q.correctAnswer
+            : 0,
+        category: String(q.category || topicPrompt.slice(0, 20) || 'Revision'),
+      }));
+    }
+  } catch (e) {
+    console.warn('Failed to parse Brain Blitz JSON:', e);
+  }
+  return null;
 }
 
 /**
@@ -395,12 +567,21 @@ export async function generateBrainBlitzQuestions(
   const safeCount = Math.max(5, Math.min(count, 30));
   const topicPrompt = topic.trim() || fileData?.fileName?.replace(/\.[^/.]+$/, '') || 'Study Material Recall';
 
-  // Try Gemini
-  if (process.env.GEMINI_API_KEY) {
-    const prompt = `Generate exactly ${safeCount} rapid-recall multiple-choice examination questions suitable for a 60-second fast active recall challenge based on "${topicPrompt}".
-${notes ? `Focus strictly on this course material/notes:\n"""\n${notes.slice(0, 20000)}\n"""\n` : ''}
-${fileData?.fileName ? `Ground questions directly in the attached learning material (${fileData.fileName}). Test definitions, key formulas, core concepts, cause-and-effect relationships, and vital facts from the document.` : ''}
-Questions must be concise, punchy, and factually rigorous with NO filler or conversational jargon.
+  let effectiveNotes = notes ? notes.trim() : '';
+  if (fileData?.base64 && (fileData.mimeType === 'application/pdf' || fileData.fileName?.toLowerCase().endsWith('.pdf'))) {
+    try {
+      const extracted = await extractTextFromPdfBase64(fileData.base64);
+      if (extracted) {
+        effectiveNotes = effectiveNotes ? `${effectiveNotes}\n\n${extracted}` : extracted;
+      }
+    } catch (err) {
+      console.warn('PDF extraction failed in generateBrainBlitzQuestions:', err);
+    }
+  }
+
+  const prompt = `Generate exactly ${safeCount} rapid-recall multiple-choice examination questions suitable for a 60-second fast active recall challenge based on "${topicPrompt}".
+${effectiveNotes ? `Focus strictly on this course material/notes:\n"""\n${effectiveNotes.slice(0, 25000)}\n"""\n` : ''}
+Questions must be punchy, factually rigorous, testing real terms, mechanisms, equations, and facts with NO filler or conversational jargon.
 Each question must have exactly 4 plausible options with one unambiguously correct answer (indexed 0-3).
 
 Return ONLY a valid JSON array matching this schema:
@@ -414,8 +595,10 @@ Return ONLY a valid JSON array matching this schema:
   }
 ]`;
 
+  // 1. Try Gemini
+  if (process.env.GEMINI_API_KEY) {
     const parts: any[] = [{ text: prompt }];
-    if (fileData?.base64 && fileData?.mimeType) {
+    if (fileData?.base64 && fileData?.mimeType && !effectiveNotes) {
       parts.push({
         inlineData: {
           mimeType: fileData.mimeType,
@@ -426,151 +609,30 @@ Return ONLY a valid JSON array matching this schema:
 
     const resText = await callGemini([{ role: 'user', parts }], ACADEMIC_SYSTEM_PROMPT);
     if (resText) {
-      try {
-        const clean = resText.replace(/```json/g, '').replace(/```/g, '').trim();
-        const list = JSON.parse(clean);
-        const parsedList = Array.isArray(list) ? list : list.questions || list.quiz || list.items;
-        if (Array.isArray(parsedList) && parsedList.length > 0) {
-          return parsedList.slice(0, safeCount).map((q: any, i: number) => ({
-            id: q.id || `bb-custom-${i + 1}-${Date.now()}`,
-            prompt: String(q.prompt || q.question),
-            options: [
-              String(q.options?.[0] || 'Option A'),
-              String(q.options?.[1] || 'Option B'),
-              String(q.options?.[2] || 'Option C'),
-              String(q.options?.[3] || 'Option D'),
-            ] as [string, string, string, string],
-            correctIndex:
-              typeof q.correctIndex === 'number' && q.correctIndex >= 0 && q.correctIndex < 4
-                ? q.correctIndex
-                : typeof q.correctAnswer === 'number' && q.correctAnswer >= 0 && q.correctAnswer < 4
-                ? q.correctAnswer
-                : 0,
-            category: String(q.category || topicPrompt.slice(0, 20) || 'Revision'),
-          }));
-        }
-      } catch (e) {
-        console.warn('Gemini Brain Blitz parse error:', e);
-      }
+      const parsed = parseBrainBlitzJson(resText, safeCount, topicPrompt);
+      if (parsed) return parsed;
     }
   }
 
-  return generateAccurateFallbackBrainBlitz(topicPrompt, notes, safeCount);
-}
-
-function generateAccurateFallbackBrainBlitz(
-  topic: string,
-  notes: string,
-  count: number
-): BrainBlitzQuestion[] {
-  const t = topic.trim() || 'Study Material';
-
-  // If notes contain sentences or bullet points, extract them into custom questions
-  const lines = notes
-    .split(/\n|\. /)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 20 && l.length < 150);
-
-  const list: BrainBlitzQuestion[] = [];
-
-  if (lines.length >= 2) {
-    for (let i = 0; i < count; i++) {
-      const line = lines[i % lines.length];
-      list.push({
-        id: `bb-note-${i + 1}-${Date.now()}`,
-        prompt: `Based on your uploaded material: "${line.slice(0, 75)}..." — what core principle is represented?`,
-        options: [
-          `Key operational mechanism of ${t}`,
-          `Transient secondary fluctuation without systemic impact`,
-          `External boundary constraint limiting throughput`,
-          `Theoretical baseline assumption in idealized conditions`,
-        ],
-        correctIndex: 0,
-        category: t.slice(0, 20),
-      });
+  // 2. Try alternative LLM
+  if (process.env.LLM_API_KEY) {
+    const messages = [
+      { role: 'system', content: ACADEMIC_SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ];
+    const llmRes = await callOpenAiCompatible(messages);
+    if (llmRes) {
+      const parsed = parseBrainBlitzJson(llmRes, safeCount, topicPrompt);
+      if (parsed) return parsed;
     }
-    return list;
   }
 
-  const templates = [
-    {
-      q: `What is the primary governing definition of ${t}?`,
-      opts: [
-        `Core mechanism dictating state transitions and interactions in ${t}`,
-        `Secondary observational artifact produced by measurement noise`,
-        `Obsolete hypothesis rejected by standard empirical consensus`,
-        `Arbitrary convention with no predictive utility`,
-      ] as [string, string, string, string],
-      ans: 0,
-    },
-    {
-      q: `Which factor directly restricts or determines the equilibrium of ${t}?`,
-      opts: [
-        `Ambient random thermal noise in non-isolated surroundings`,
-        `Physical conservation laws and boundary parameters`,
-        `Subjective observational interpretation of the experimenter`,
-        `Statistical outliers that cancel across infinite sampling`,
-      ] as [string, string, string, string],
-      ans: 1,
-    },
-    {
-      q: `In the study of ${t}, what is the mandatory SI base unit verification?`,
-      opts: [
-        `Dimensional analysis ensuring homogeneity across equations`,
-        `Assuming all variable rates are constant linear functions`,
-        `Omitting boundary conditions to simplify evaluation`,
-        `Rounding intermediate products before calculating outputs`,
-      ] as [string, string, string, string],
-      ans: 0,
-    },
-    {
-      q: `What occurs to ${t} under asymptotic or saturation limits?`,
-      opts: [
-        `Response reaches a maximum ceiling set by rate-limiting steps`,
-        `Output diverges infinitely without energy expenditure`,
-        `Internal entropy instantaneously collapses to zero`,
-        `All intermolecular interactions cease completely`,
-      ] as [string, string, string, string],
-      ans: 0,
-    },
-    {
-      q: `What is the key differentiator separating ${t} from closely linked concepts?`,
-      opts: [
-        `Specific causal pathways, energetic coupling, and stoichiometry`,
-        `Cosmetic naming differences without structural meaning`,
-        `Historical publication date in academic journals`,
-        `No conceptual distinction exists in standard curricula`,
-      ] as [string, string, string, string],
-      ans: 0,
-    },
-    {
-      q: `When evaluating rate kinetics in ${t}, which parameter is primary?`,
-      opts: [
-        `Activation energy and catalytic availability`,
-        `Volume of non-participating inert spectator media`,
-        `Geometric color of the containment apparatus`,
-        `Atmospheric humidity regardless of system seal`,
-      ] as [string, string, string, string],
-      ans: 0,
-    },
-  ];
-
-  for (let i = 0; i < count; i++) {
-    const tmpl = templates[i % templates.length];
-    list.push({
-      id: `bb-fallback-${i + 1}-${Date.now()}`,
-      prompt: tmpl.q,
-      options: tmpl.opts,
-      correctIndex: tmpl.ans,
-      category: t.slice(0, 20),
-    });
-  }
-
-  return list;
+  // 3. Grounded Brain Blitz from document facts
+  return generateGroundedBrainBlitz(topicPrompt, effectiveNotes, safeCount);
 }
 
 // --------------------------------------------------------------------------
-// Rigorous Academic Fallback Engines (Direct, Accurate, Zero Jargon)
+// Concept Tutor Academic Fallback Engines (Accurate, Direct, Rigorous)
 // --------------------------------------------------------------------------
 
 function generateAccurateAcademicResponse(
@@ -628,6 +690,31 @@ $$6\\text{CO}_2 + 6\\text{H}_2\\text{O} + \\text{Photons} \\longrightarrow \\tex
   - At elevated temperatures and low $CO_2$, RuBisCO binds $O_2$ instead of $CO_2$, initiating wasteful photorespiration.`;
   }
 
+  if (q.includes('respiration') || q.includes('glycolysis') || q.includes('krebs') || q.includes('atp')) {
+    return `### Cellular Respiration: Comprehensive Biochemical Breakdown
+
+**Overall Stoichiometric Equation:**
+$$\\text{C}_6\\text{H}_{12}\\text{O}_6 + 6\\text{O}_2 \\longrightarrow 6\\text{CO}_2 + 6\\text{H}_2\\text{O} + 30\\text{-}32\\text{ ATP}$$
+
+#### The Four Sequential Metabolic Stages:
+1. **Glycolysis (Cytosol, Anaerobic):**
+   - Enzymatic cleavage of 1 glucose (6C) into 2 pyruvate (3C) molecules.
+   - Net yield: **2 ATP** (via substrate-level phosphorylation) and **2 NADH**.
+   - Rate-limiting enzyme: Phosphofructokinase-1 (PFK-1), allosterically inhibited by ATP and citrate.
+
+2. **Link Reaction / Pyruvate Decarboxylation (Mitochondrial Matrix):**
+   - Pyruvate dehydrogenase converts 2 pyruvate into 2 Acetyl-CoA (2C), releasing $2\\text{ CO}_2$ and yielding **2 NADH**.
+
+3. **Krebs Cycle / Citric Acid Cycle (Mitochondrial Matrix):**
+   - Acetyl-CoA condenses with oxaloacetate (4C) to form citrate (6C).
+   - Per glucose molecule (2 turns): Yields **2 ATP/GTP**, **6 NADH**, **2 FADH2**, and releases $4\\text{ CO}_2$.
+
+4. **Oxidative Phosphorylation & Chemiosmosis (Inner Mitochondrial Membrane):**
+   - Electrons from 10 NADH and 2 FADH2 pass through Complexes I–IV of the Electron Transport Chain (ETC).
+   - Protons ($H^+$) are pumped into the intermembrane space, generating a steep proton motive force.
+   - Protons return down their electrochemical gradient through **ATP Synthase**, producing approximately **26–28 ATP**. Final electron acceptor: $O_2$ reduced to $H_2O$.`;
+  }
+
   if (q.includes('newton') || q.includes('force') || q.includes('momentum')) {
     return `### Newton's Three Laws of Classical Dynamics
 
@@ -674,177 +761,4 @@ In formal curriculum standards, this concept is defined through empirical observ
 - Conflating correlation with direct linear causality.
 - Failing to verify consistent SI base units across calculations.
 - Overlooking conservation laws (mass, energy, charge, or momentum).`;
-}
-
-function generateFallbackDocumentSummary(text: string, fileName: string): DocumentSummary {
-  const cleanTitle = fileName ? fileName.replace(/\.[^/.]+$/, '') : 'Lecture Material';
-  const sample = text.trim();
-
-  // Extract meaningful sentences
-  const sentences = sample
-    .split(/[.?!]\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 25);
-
-  const exec = sentences.length > 3
-    ? `${sentences.slice(0, 3).join('. ')}. This material provides a structured framework detailing the foundational theoretical premises, key empirical evidence, and practical applications in modern academic examination standards.`
-    : `This document contains core academic lecture and revision notes on ${cleanTitle}. It details essential terminology, governing mechanisms, and practical problem-solving rules necessary for syllabus mastery.`;
-
-  return {
-    title: cleanTitle,
-    executiveSummary: exec,
-    keyConcepts: [
-      {
-        term: 'Foundational Theory',
-        definition: `The core governing principle established in ${cleanTitle}, dictating equilibrium and system behavior.`,
-      },
-      {
-        term: 'Governing Parameters',
-        definition: 'Measurable variables, boundary constraints, and conservation laws defining system states.',
-      },
-      {
-        term: 'Empirical Verification',
-        definition: 'Experimental methodologies and criteria used to confirm predictions and calculate rates of change.',
-      },
-      {
-        term: 'Synthesis & Application',
-        definition: 'Applying fundamental principles to solve unfamiliar quantitative or analytical exam scenarios.',
-      },
-    ],
-    examTakeaways: [
-      `Review exact definitions and standard SI units associated with ${cleanTitle}.`,
-      'Memorize the causal progression and distinguishing features separating related concepts.',
-      'Practice solving multi-step questions without relying on reference formula sheets.',
-    ],
-    sourceNotes: sample.slice(0, 3000),
-    source: 'fallback',
-  };
-}
-
-function generateAccurateFallbackQuiz(
-  topic: string,
-  notes: string,
-  count: number,
-  difficulty: DifficultyLevel
-): QuizQuestion[] {
-  const t = topic.trim();
-  const list: QuizQuestion[] = [];
-
-  const library = [
-    {
-      q: `What is the precise scientific/academic definition of ${t}?`,
-      opts: [
-        `The fundamental governing mechanism defining systemic state transitions in ${t}`,
-        `A localized secondary fluctuation observed exclusively in transient states`,
-        `An obsolete hypothesis superseded by modern unified theories`,
-        `An arbitrary measurement convention without empirical backing`,
-      ] as [string, string, string, string],
-      ans: 0,
-      exp: `Option A correctly identifies the defining scientific principle of ${t}. The other options either diminish its fundamental significance or mischaracterize its empirical role.`,
-    },
-    {
-      q: `Which governing variable directly limits or controls the equilibrium of ${t}?`,
-      opts: [
-        `Uncontrolled ambient noise in non-isolated environments`,
-        `The physical conservation of energy and equilibrium boundary parameters`,
-        `The subjective preference of the observer recording the data`,
-        `Random distribution errors that cancel over infinite trials`,
-      ] as [string, string, string, string],
-      ans: 1,
-      exp: `Option B is correct: the equilibrium of ${t} is dictated strictly by physical conservation laws and boundary parameters.`,
-    },
-    {
-      q: `When solving quantitative examination problems on ${t}, which step is essential?`,
-      opts: [
-        `Applying dimensional analysis to verify consistent SI base units across terms`,
-        `Assuming all variables change at identical constant linear rates`,
-        `Omitting boundary conditions to simplify algebraic calculations`,
-        `Rounding intermediate calculations prior to final evaluation`,
-      ] as [string, string, string, string],
-      ans: 0,
-      exp: `Option A is correct: dimensional analysis and consistent SI unit verification are mandatory to prevent systematic errors in evaluating ${t}.`,
-    },
-    {
-      q: `How does ${t} behave under extreme or asymptotic limits?`,
-      opts: [
-        `System response saturates at a defined ceiling established by rate-limiting factors`,
-        `Output diverges to positive infinity without energy consumption`,
-        `Internal entropy drops to absolute zero instantaneously`,
-        `All chemical or physical interactions cease permanently`,
-      ] as [string, string, string, string],
-      ans: 0,
-      exp: `Option A is correct: natural systems governing ${t} experience saturation kinetics governed by finite resource availability.`,
-    },
-    {
-      q: `What is the primary distinction between ${t} and its closely related counterpart?`,
-      opts: [
-        `The specific causal pathway, energy transfer mode, and reaction stoichiometry`,
-        `Only the historical year during which it was documented`,
-        `Arbitrary cosmetic labeling without functional differences`,
-        `No distinction exists within standard academic syllabi`,
-      ] as [string, string, string, string],
-      ans: 0,
-      exp: `Option A is correct: examiners test the precise causal pathways and thermodynamic parameters distinguishing ${t}.`,
-    },
-  ];
-
-  for (let i = 0; i < count; i++) {
-    const item = library[i % library.length];
-    list.push({
-      id: `q-${i + 1}-${Date.now()}`,
-      question: item.q,
-      options: item.opts,
-      correctAnswer: item.ans,
-      explanation: item.exp,
-    });
-  }
-
-  return list;
-}
-
-function generateAccurateFallbackFlashcards(
-  topic: string,
-  notes: string,
-  count: number
-): Flashcard[] {
-  const t = topic.trim();
-  const defaults = [
-    {
-      front: `Definition of ${t}`,
-      back: `Fundamental scientific or academic principle describing the mechanism, behavior, and properties of ${t}.`,
-    },
-    {
-      front: `Governing Equation / Law for ${t}`,
-      back: `Formal mathematical relationship or physical law relating dependent variables under standard conditions.`,
-    },
-    {
-      front: `Limiting Factors & Constraints in ${t}`,
-      back: `Critical environmental and concentration bounds that dictate rate of reaction or state transitions.`,
-    },
-    {
-      front: `Key Distinction in ${t}`,
-      back: `Primary operational difference separating ${t} from adjacent processes in official curriculum syllabi.`,
-    },
-    {
-      front: `Common Examination Pitfall (${t})`,
-      back: `Confusing cause with effect, or failing to convert units into standard SI base equivalents.`,
-    },
-    {
-      front: `Practical Application of ${t}`,
-      back: `Used by researchers and engineers to model predictive outcomes and design empirical systems.`,
-    },
-  ];
-
-  const results: Flashcard[] = [];
-  for (let i = 0; i < count; i++) {
-    const d = defaults[i % defaults.length];
-    results.push({
-      id: `fc-${Date.now()}-${i}`,
-      front: d.front,
-      back: d.back,
-      position: i,
-      known: false,
-    });
-  }
-  return results;
 }

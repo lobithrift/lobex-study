@@ -59,6 +59,13 @@ export const reportAiSchema = z.object({
   reason: z.string().min(1).max(1000),
 });
 
+export const loginNotificationSchema = z.object({
+  email: z.string().min(1, 'Email is required').max(150),
+  displayName: z.string().max(100).optional(),
+  event: z.enum(['login', 'signup', 'demo_access']).default('login'),
+  userAgent: z.string().max(500).optional(),
+});
+
 export const summarizeDocumentSchema = z.object({
   text: z.string().max(50000, 'Document text exceeds 50,000 characters').optional().default(''),
   pdfBase64: z.string().optional(),

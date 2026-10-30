@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { emailSendSchema } from '@/lib/validation/schemas';
 
+if (process.env.NODE_ENV === 'development') {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+
 export async function POST(req: NextRequest) {
   try {
     const json = await req.json();

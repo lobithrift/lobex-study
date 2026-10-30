@@ -17,6 +17,7 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
+import { triggerLoginNotification } from '@/lib/utils/notifyLogin';
 
 function LoginForm() {
   const router = useRouter();
@@ -68,6 +69,12 @@ function LoginForm() {
 
         if (error) throw error;
 
+        triggerLoginNotification({
+          email: email.trim(),
+          displayName: displayName.trim() || undefined,
+          event: 'signup',
+        });
+
         if (data.session) {
           router.push('/dashboard');
         } else {
@@ -84,6 +91,11 @@ function LoginForm() {
         });
 
         if (error) throw error;
+
+        triggerLoginNotification({
+          email: email.trim(),
+          event: 'login',
+        });
 
         router.push('/dashboard');
       } else if (tab === 'forgot') {
@@ -154,17 +166,27 @@ function LoginForm() {
   };
 
   const handleInstantDemoLogin = () => {
+    const demoEmail = email.trim() || 'student@lobex-study.internal';
+    const demoName = displayName.trim() || 'Alex Rivera';
+
     if (typeof window !== 'undefined') {
       localStorage.setItem(
         'lobex_demo_user',
         JSON.stringify({
           id: 'demo-student-uuid',
-          email: email.trim() || 'student@lobex-study.internal',
-          display_name: displayName.trim() || 'Alex Rivera',
+          email: demoEmail,
+          display_name: demoName,
           role: 'student',
         })
       );
     }
+
+    triggerLoginNotification({
+      email: demoEmail,
+      displayName: demoName,
+      event: 'demo_access',
+    });
+
     router.push('/dashboard');
   };
 

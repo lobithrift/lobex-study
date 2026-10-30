@@ -18,6 +18,9 @@ import {
   Eye,
   EyeOff,
   LogOut,
+  Bell,
+  Send,
+  Laptop,
 } from 'lucide-react';
 import { AlertBanner } from '@/components/ui/AlertBanner';
 
@@ -33,6 +36,8 @@ export default function AdminPage() {
   const [activeAdminUser, setActiveAdminUser] = useState<string>('lobex_admin');
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [isLockedOut, setIsLockedOut] = useState(false);
+  const [testingAlert, setTestingAlert] = useState(false);
+  const [alertNotice, setAlertNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const fetchAdminStats = async (token?: string) => {
     const activeToken = token || sessionStorage.getItem('lobex_admin_token');
@@ -158,6 +163,44 @@ export default function AdminPage() {
       }
     } catch (e) {
       console.error('Error updating report:', e);
+    }
+  };
+
+  const handleTriggerTestAlert = async () => {
+    const activeToken = sessionStorage.getItem('lobex_admin_token');
+    if (!activeToken) return;
+
+    setTestingAlert(true);
+    setAlertNotice(null);
+    try {
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken,
+        },
+        body: JSON.stringify({ action: 'test_notification' }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAlertNotice({
+          type: 'success',
+          text: `Success! Test alert dispatched to ${data.targetEmail}. Check your inbox!`,
+        });
+        fetchAdminStats(activeToken);
+      } else {
+        setAlertNotice({
+          type: 'error',
+          text: data.statusMessage || 'Failed to dispatch test notification.',
+        });
+      }
+    } catch (e: any) {
+      setAlertNotice({
+        type: 'error',
+        text: e.message || 'Error triggering test notification.',
+      });
+    } finally {
+      setTestingAlert(false);
     }
   };
 
@@ -377,6 +420,131 @@ export default function AdminPage() {
             <span className="text-xs text-slate-500 font-medium">Admin Auth Protocol</span>
             <p className="text-2xl font-black text-emerald-600 mt-1">Token-Gated</p>
           </div>
+        </div>
+      </div>
+
+      {/* Live User Login Telemetry & Email Alerts */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold">
+              <Bell className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-800">User Login Telemetry & Email Alerts</h2>
+              <p className="text-xs text-slate-500">
+                Automatic security notifications dispatched when students register or sign in
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono bg-slate-100 text-slate-700 px-2.5 py-1.5 rounded-lg border border-slate-200">
+              Alerts: <strong>{statsData?.notificationPipeline?.adminEmail || 'lobithrift@gmail.com'}</strong>
+            </span>
+            <button
+              type="button"
+              onClick={handleTriggerTestAlert}
+              disabled={testingAlert}
+              className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+            >
+              <Send className={`w-3.5 h-3.5 ${testingAlert ? 'animate-spin' : ''}`} />
+              <span>{testingAlert ? 'Sending...' : 'Send Test Alert'}</span>
+            </button>
+          </div>
+        </div>
+
+        {alertNotice && (
+          <div
+            className={`p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+              alertNotice.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border border-rose-200'
+            }`}
+          >
+            {alertNotice.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+            )}
+            <span>{alertNotice.text}</span>
+          </div>
+        )}
+
+        {/* Recent Logins Table */}
+        <div className="overflow-x-auto">
+          {(!statsData?.recentLogins || statsData.recentLogins.length === 0) ? (
+            <div className="py-8 text-center text-sm text-slate-400 bg-slate-50/50 rounded-xl border border-dashed border-slate-200">
+              No logins recorded in this session. Log in or sign up to view live telemetry.
+            </div>
+          ) : (
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500 font-semibold uppercase">
+                  <th className="py-2.5 px-3">Student Email</th>
+                  <th className="py-2.5 px-3">Event</th>
+                  <th className="py-2.5 px-3">Timestamp</th>
+                  <th className="py-2.5 px-3">IP Address</th>
+                  <th className="py-2.5 px-3">Email Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {statsData.recentLogins.map((entry: any) => (
+                  <tr key={entry.id} className="hover:bg-slate-50/80 transition-colors">
+                    <td className="py-3 px-3 font-semibold text-slate-800">
+                      <div>{entry.email}</div>
+                      {entry.displayName && (
+                        <div className="text-[11px] text-slate-400 font-normal">{entry.displayName}</div>
+                      )}
+                    </td>
+                    <td className="py-3 px-3">
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                          entry.event === 'signup'
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : entry.event === 'demo_access'
+                            ? 'bg-purple-100 text-purple-800'
+                            : 'bg-blue-100 text-blue-800'
+                        }`}
+                      >
+                        {entry.event === 'signup'
+                          ? 'Registration'
+                          : entry.event === 'demo_access'
+                          ? 'Fast-Pass'
+                          : 'Sign-In'}
+                      </span>
+                    </td>
+                    <td className="py-3 px-3 text-slate-600 font-mono text-[11px]">
+                      {entry.formattedTime || entry.timestamp}
+                    </td>
+                    <td className="py-3 px-3 text-slate-500 font-mono text-[11px]">
+                      {entry.ip}
+                    </td>
+                    <td className="py-3 px-3">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold ${
+                          entry.emailSent
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                            : 'bg-slate-100 text-slate-600 border border-slate-200'
+                        }`}
+                      >
+                        {entry.emailSent ? (
+                          <>
+                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                            <span>Delivered</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>Audit Logged</span>
+                          </>
+                        )}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
 

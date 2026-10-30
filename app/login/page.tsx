@@ -9,6 +9,8 @@ import {
   UserCheck,
   UserPlus,
   LogIn,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 
@@ -20,6 +22,7 @@ function LoginForm() {
   const [tab, setTab] = useState<'signin' | 'signup'>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
@@ -188,18 +191,51 @@ function LoginForm() {
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1.5 text-sm">Password</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block font-semibold text-slate-700 text-sm">Password</label>
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-900 transition-colors inline-flex items-center gap-1 focus:outline-none"
+                tabIndex={-1}
+              >
+                {showPassword ? (
+                  <>
+                    <EyeOff className="w-3.5 h-3.5" />
+                    <span>Hide password</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Show password</span>
+                  </>
+                )}
+              </button>
+            </div>
             <div className="relative">
               <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
               <input
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
+                placeholder={showPassword ? 'Enter your password' : '••••••••'}
                 required
                 minLength={6}
-                className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-300 text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-slate-900"
+                className="w-full pl-10 pr-11 py-3 rounded-xl border border-slate-300 text-sm sm:text-base focus:outline-none focus:ring-2 focus:ring-slate-900"
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3.5 top-3 text-slate-400 hover:text-slate-700 p-1 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                title={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? (
+                  <EyeOff className="w-4 h-4" />
+                ) : (
+                  <Eye className="w-4 h-4" />
+                )}
+              </button>
             </div>
           </div>
 

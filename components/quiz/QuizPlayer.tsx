@@ -113,7 +113,7 @@ export function QuizPlayer() {
 
   const handleGenerate = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!topic.trim()) return;
+    const effectiveTopic = topic.trim() || uploadedFile?.name?.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ') || 'Course Material Revision';
 
     setIsLoading(true);
     setError(null);
@@ -125,7 +125,7 @@ export function QuizPlayer() {
 
     try {
       const payload: any = {
-        topic: topic.trim(),
+        topic: effectiveTopic,
         notes: (fileResult?.extractedText || notes).trim(),
         questionCount: Number(questionCount),
         difficulty,
@@ -143,7 +143,13 @@ export function QuizPlayer() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to generate quiz. Please check options.');
+        let detailedMsg = data.error;
+        if (data.details?.fieldErrors) {
+          detailedMsg = Object.entries(data.details.fieldErrors)
+            .map(([field, errs]: any) => `${field}: ${errs.join(', ')}`)
+            .join('; ');
+        }
+        throw new Error(detailedMsg || 'Failed to generate quiz. Please check options.');
       }
 
       const data = await res.json();

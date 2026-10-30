@@ -26,24 +26,24 @@ export const educationalFileSchema = z.object({
 });
 
 export const quizGenerateSchema = z.object({
-  topic: z.string().min(1, 'Please specify a topic').max(300, 'Topic cannot exceed 300 characters'),
-  notes: z.string().max(50000, 'Notes cannot exceed 50,000 characters').optional().default(''),
-  questionCount: z.number().int().min(1).max(20).default(5),
+  topic: z.string().max(300, 'Topic cannot exceed 300 characters').optional().default('Course Revision'),
+  notes: z.string().max(150000, 'Notes cannot exceed 150,000 characters').optional().default(''),
+  questionCount: z.coerce.number().int().min(1).max(25).default(5),
   difficulty: difficultyLevelSchema.default('medium'),
   fileData: educationalFileSchema.optional(),
 });
 
 export const flashcardsGenerateSchema = z.object({
-  topic: z.string().min(1, 'Please specify a topic').max(300, 'Topic cannot exceed 300 characters'),
-  notes: z.string().max(50000, 'Notes cannot exceed 50,000 characters').optional().default(''),
-  count: z.number().int().min(1).max(20).default(6),
+  topic: z.string().max(300, 'Topic cannot exceed 300 characters').optional().default('Course Revision'),
+  notes: z.string().max(150000, 'Notes cannot exceed 150,000 characters').optional().default(''),
+  count: z.coerce.number().int().min(1).max(25).default(6),
   fileData: educationalFileSchema.optional(),
 });
 
 export const brainBlitzGenerateSchema = z.object({
   topic: z.string().max(300).optional().default(''),
-  notes: z.string().max(50000, 'Notes cannot exceed 50,000 characters').optional().default(''),
-  questionCount: z.number().int().min(5).max(30).default(15),
+  notes: z.string().max(150000, 'Notes cannot exceed 150,000 characters').optional().default(''),
+  questionCount: z.coerce.number().int().min(5).max(35).default(15),
   fileData: educationalFileSchema.optional(),
 });
 

@@ -21,7 +21,6 @@ import {
   Bell,
   Send,
   Laptop,
-  KeyRound,
 } from 'lucide-react';
 import { AlertBanner } from '@/components/ui/AlertBanner';
 
@@ -306,24 +305,10 @@ export default function AdminPage() {
             </button>
           </form>
 
-          <div className="pt-2 border-t border-slate-100 space-y-2.5">
-            <button
-              type="button"
-              onClick={() => {
-                setUsername('lobex_admin');
-                setPassword('LobexAdmin#2026!Secure');
-                setErrorMsg('');
-              }}
-              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer border border-slate-200"
-            >
-              <KeyRound className="w-3.5 h-3.5 text-slate-500" />
-              <span>Auto-Fill Admin Credentials</span>
-            </button>
-
-            <div className="p-2.5 bg-amber-50/70 rounded-xl border border-amber-200/60 text-[11px] text-amber-900 leading-relaxed text-center">
-              <strong>Admin ID:</strong> <code className="bg-amber-100/80 px-1 py-0.5 rounded">lobex_admin</code> or <code className="bg-amber-100/80 px-1 py-0.5 rounded">lobithrift@gmail.com</code><br />
-              <strong>Password:</strong> <code className="bg-amber-100/80 px-1 py-0.5 rounded">LobexAdmin#2026!Secure</code>
-            </div>
+          <div className="pt-2 border-t border-slate-100 text-center">
+            <p className="text-xs text-slate-400">
+              Access logs and security verification recorded locally.
+            </p>
           </div>
         </div>
       </div>

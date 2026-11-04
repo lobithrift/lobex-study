@@ -379,6 +379,8 @@ STRICT EXAMINATION REQUIREMENTS:
 2. NO GENERIC JARGON: Strictly avoid abstract fillers (e.g. "What is the precise scientific definition...", "Which variable limits equilibrium..."). Ask actual, direct, syllabus-grounded questions.
 3. Plausible Distractors: All 4 options must be distinct, plausible academic answers (terms, definitions, or mechanisms from the same subject area).
 4. Explanations: The explanation must cite the specific reason or source fact confirming why the correct answer is valid.
+5. ZERO AI FEEL: Never use robotic phrases like "According to your study material", "As stated in your notes", "Based on the provided document", or "Option A is correct because...". Write direct, natural, authoritative examination questions.
+6. AUTHENTIC DISTRACTORS: All 4 options must be concrete, plausible terms from the subject area. Never use synthetic nonsense phrases.
 
 ${effectiveNotes ? `Study Material / Notes:\n"""\n${effectiveNotes.slice(0, 30000)}\n"""\n` : ''}
 

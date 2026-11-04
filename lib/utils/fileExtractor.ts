@@ -52,10 +52,32 @@ export async function extractEducationalFile(file: File): Promise<ExtractedFileR
     // 1. PDF
     if (file.type === 'application/pdf' || lowerName.endsWith('.pdf')) {
       const base64 = await fileToBase64(file);
+      let extractedText: string | undefined;
+
+      // Call extraction route to populate plain text for immediate client UI preview and grounding
+      if (typeof window !== 'undefined') {
+        try {
+          const res = await fetch('/api/ai/extract-text', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base64, fileName: name, mimeType: 'application/pdf' }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.text && typeof data.text === 'string') {
+              extractedText = data.text;
+            }
+          }
+        } catch (e) {
+          console.warn('Client-side PDF text extraction helper caught:', e);
+        }
+      }
+
       return {
         fileName: name,
         fileType: 'pdf',
         sizeBytes,
+        extractedText,
         fileData: {
           base64,
           mimeType: 'application/pdf',

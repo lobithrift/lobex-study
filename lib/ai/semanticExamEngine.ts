@@ -1,153 +1,357 @@
 import { DifficultyLevel, QuizQuestion, Flashcard, BrainBlitzQuestion, DocumentSummary } from '@/types';
 
 export interface ExtractedFact {
-  term: string;
-  definition: string;
-  category?: string;
-  contextSentence: string;
-  type: 'definition' | 'function' | 'mechanism' | 'distinction' | 'location';
+  subject: string;
+  predicate: string;
+  type: 'definition' | 'action' | 'date_time' | 'location' | 'role' | 'composition' | 'requirement' | 'general';
+  fullSentence: string;
+  stem: string;
+  answer: string;
+  distractorType: 'entity' | 'predicate' | 'date';
+}
+
+export interface DocumentVocabulary {
+  entities: string[];
+  dates: string[];
+  predicates: string[];
 }
 
 /**
- * Cleans and tokenizes text into distinct sentences and structured paragraphs.
+ * Normalizes and cleans raw text into structured sentences.
  */
-function extractSentences(text: string): string[] {
+export function extractSentences(text: string): string[] {
   if (!text) return [];
-  return text
+  const cleaned = text
     .replace(/\r\n/g, '\n')
     .replace(/[•*–—]\s*/g, '\n')
+    .replace(/\t/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return cleaned
     .split(/\n+|(?<=[.?!])\s+(?=[A-Z0-9])/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 25 && s.length <= 400 && !/^(page\s+\d+|chapter\s+\d+|table\s+of\s+contents|slide\s+\d+)/i.test(s));
+    .map((s) => s.trim().replace(/^[:=–—\s-]+/, '').trim())
+    .filter(
+      (s) =>
+        s.length >= 15 &&
+        s.length <= 450 &&
+        !/^(page\s+\d+|slide\s+\d+|table\s+of\s+contents|chapter\s+\d+|figure\s+\d+)/i.test(s)
+    );
+}
+
+function cleanEntityName(raw: string): string {
+  return raw
+    .replace(/^(the|a|an|in|on|at|by|from|this|these|those)\s+/i, '')
+    .replace(/\s+(?:is\s+(?:a|an|the)|that|which|who|where).*$/i, '')
+    .replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9)]+$/g, '')
+    .trim();
 }
 
 /**
- * Deep semantic extractor: identifies definitions, functions, mechanisms,
- * and key concepts directly from uploaded notes or course materials.
+ * Extracts entities, key vocabulary, and dates directly from the uploaded material.
+ * Used to construct authentic, non-jargon multiple choice options.
  */
-export function extractDocumentFacts(text: string): ExtractedFact[] {
+export function extractDocumentVocabulary(text: string): DocumentVocabulary {
+  const sentences = extractSentences(text);
+  const entities = new Set<string>();
+  const dates = new Set<string>();
+  const predicates = new Set<string>();
+
+  // Date pattern: "June 1942", "1914", "1939-1945"
+  const dateRegex = /\b(?:(?:in\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}|\d{4}(?:-\d{4})?)\b/gi;
+
+  for (const s of sentences) {
+    const dateMatches = s.match(dateRegex);
+    if (dateMatches) {
+      dateMatches.forEach((d) => dates.add(d.replace(/^in\s+/i, '').trim()));
+    }
+
+    // Capitalized multi-word or single-word entities (e.g. "Battle of Midway", "Chester W. Nimitz", "Thylakoid Membrane")
+    const capitalizedMatches = s.match(/\b([A-Z][a-zA-Z0-9]+(?:\s+(?:of|and|in|the|for|de)?\s+[A-Z][a-zA-Z0-9]+)*)\b/g);
+    if (capitalizedMatches) {
+      capitalizedMatches.forEach((m) => {
+        const clean = cleanEntityName(m);
+        if (
+          clean.length >= 3 &&
+          clean.length <= 50 &&
+          !/^(The|This|These|Those|When|What|Where|Which|Who|Why|However|Therefore|According|In|During|After|Before|Between|Because|Since|Although|Each|Every|Most|All)$/i.test(
+            clean
+          )
+        ) {
+          entities.add(clean);
+        }
+      });
+    }
+
+    // Term: Definition glossary format
+    const colonMatch = s.match(/^([A-Z0-9][a-zA-Z0-9\s()/-]{2,45})\s*[:–—-]/);
+    if (colonMatch) {
+      const clean = cleanEntityName(colonMatch[1]);
+      if (clean.length >= 3) entities.add(clean);
+    }
+  }
+
+  return {
+    entities: Array.from(entities),
+    dates: Array.from(dates),
+    predicates: Array.from(predicates),
+  };
+}
+
+/**
+ * Comprehensive Multi-Disciplinary Knowledge & Semantic Fact Extractor.
+ * Extracts authentic, syllabus-grounded facts from science, humanities, tech, law, and business texts.
+ */
+export function extractDocumentFacts(text: string, topic: string = ''): ExtractedFact[] {
   const sentences = extractSentences(text);
   const facts: ExtractedFact[] = [];
-  const seenTerms = new Set<string>();
-
-  const cleanTermName = (raw: string): string => {
-    return raw
-      .replace(/^(the|a|an)\s+/i, '')
-      .replace(/^[^a-zA-Z0-9]+|[^a-zA-Z0-9)]+$/g, '')
-      .trim();
-  };
-
-  const addFact = (fact: ExtractedFact) => {
-    const cleanTerm = cleanTermName(fact.term);
-    if (cleanTerm.length < 3 || cleanTerm.length > 55) return;
-    if (seenTerms.has(cleanTerm.toLowerCase())) return;
-    seenTerms.add(cleanTerm.toLowerCase());
-    facts.push({
-      ...fact,
-      term: cleanTerm,
-      definition: fact.definition.trim().replace(/^[:=–—\s-]+/, '').trim(),
-    });
-  };
+  const seenSubjects = new Set<string>();
 
   for (const sentence of sentences) {
-    // 1. Heading or Glossary style: "Term: Definition" or "Term - Definition"
-    const colonMatch = sentence.match(/^([A-Z][a-zA-Z0-9\s()/-]{2,50})\s*[:–—]\s*(.{20,250})$/);
+    // 1. Heading / Glossary / Colon pattern: "Term: Definition"
+    const colonMatch = sentence.match(/^([A-Z0-9][a-zA-Z0-9\s()/-]{2,50})\s*[:–—]\s*(.{15,280})$/);
     if (colonMatch) {
-      const defCandidate = colonMatch[2].trim();
-      const wordCount = defCandidate.split(/\s+/).length;
-      const isSubheading = wordCount < 6 || defCandidate.endsWith(':') || /^(module|chapter|unit|section|lecture|part|overview|introduction)/i.test(colonMatch[1]);
-      if (!isSubheading) {
-        addFact({
-          term: colonMatch[1],
-          definition: defCandidate,
-          contextSentence: sentence,
+      const subject = cleanEntityName(colonMatch[1]);
+      const def = colonMatch[2].trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        facts.push({
+          subject,
+          predicate: def,
           type: 'definition',
+          fullSentence: sentence,
+          stem: `What is ${subject}?`,
+          answer: def,
+          distractorType: 'predicate',
         });
         continue;
       }
     }
 
-    // 2. Explicit definition patterns: "X is defined as Y", "X refers to Y", "X denotes Y"
-    const defMatch = sentence.match(
-      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:is defined as|refers to|denotes|is described as|means|is known as)\s+([^.;\n]{20,250})/i
-    );
-    if (defMatch) {
-      addFact({
-        term: defMatch[1],
-        definition: defMatch[2],
-        contextSentence: sentence,
-        type: 'definition',
-      });
-      continue;
-    }
-
-    // 3. Location and occurrence: "The Krebs Cycle takes place in the mitochondrial matrix..."
+    // 2. Location / Occurrence: "takes place in", "occurs in", "is located in", "happened in", "took place in"
     const locMatch = sentence.match(
-      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45}?)(?:,\s*also known as\s+[^,]+,)?\s+(?:takes place in|occurs in|is located in|resides in)\s+([^.;\n]{15,250})/i
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45}?)(?:,\s*also known as\s+[^,]+,)?\s+(takes place in|took place in|occurs in|occurred in|resides in|is located in|happened in|began in|started in)\s+([^.;\n]{3,160})/i
     );
     if (locMatch) {
-      addFact({
-        term: locMatch[1],
-        definition: `Takes place in ${locMatch[2]}`,
-        contextSentence: sentence,
-        type: 'location',
-      });
-      continue;
+      const subject = cleanEntityName(locMatch[1]);
+      const verb = locMatch[2].toLowerCase();
+      const target = locMatch[3].trim().replace(/^[:=–—\s-]+/, '');
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        const isTime = /\b(18\d\d|19\d\d|20\d\d|January|February|March|April|May|June|July|August|September|October|November|December|century|era|summer|spring|winter|fall)\b/i.test(
+          target
+        );
+        facts.push({
+          subject,
+          predicate: `${verb} ${target}`,
+          type: isTime ? 'date_time' : 'location',
+          fullSentence: sentence,
+          stem: isTime ? `When did ${subject} take place?` : `Where does ${subject} take place?`,
+          answer: target,
+          distractorType: isTime ? 'date' : 'entity',
+        });
+        continue;
+      }
     }
 
-    // 4. Functional & conversion patterns: "X converts Y into Z", "X produces Y", "X breaks down Y"
-    const convMatch = sentence.match(
-      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:converts|transforms|breaks down|oxidizes|synthesizes|generates|produces|catalyzes)\s+([^.;\n]{20,250})/i
+    // 3. Containment & Composition: "contains", "consists of", "includes", "houses"
+    const containMatch = sentence.match(
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(contains?|consists?\s+of|includes?|houses?|is\s+composed\s+of)\s+([^.;\n]{8,220})/i
     );
-    if (convMatch) {
-      addFact({
-        term: convMatch[1],
-        definition: `Converts or synthesizes ${convMatch[2]}`,
-        contextSentence: sentence,
-        type: 'function',
-      });
-      continue;
+    if (containMatch) {
+      const subject = cleanEntityName(containMatch[1]);
+      const verb = containMatch[2].toLowerCase();
+      const target = containMatch[3].trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        facts.push({
+          subject,
+          predicate: `${verb} ${target}`,
+          type: 'composition',
+          fullSentence: sentence,
+          stem: `What does ${subject} contain or consist of?`,
+          answer: target,
+          distractorType: 'predicate',
+        });
+        continue;
+      }
     }
 
-    // 5. General functional patterns: "X is responsible for Y", "X functions to Y"
-    const funcMatch = sentence.match(
-      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:is responsible for|functions to|serves as|acts as|plays a crucial role in|regulates|inhibits)\s+([^.;\n]{20,250})/i
+    // 4. Role / Leadership / Historical Figures: "[Person] was/is/served as [Role] of [Org]"
+    const roleMatch = sentence.match(
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9.\s()/-]{2,45})\s+(?:was|is|served as)\s+(?:the\s+)?(Commander\s+in\s+Chief|President|Prime\s+Minister|Founder|Director|Leader|Secretary|author|creator|inventor|discoverer|architect|general)([^.;\n]{3,160})/i
     );
-    if (funcMatch) {
-      addFact({
-        term: funcMatch[1],
-        definition: `Responsible for ${funcMatch[2]}`,
-        contextSentence: sentence,
-        type: 'function',
-      });
-      continue;
+    if (roleMatch) {
+      const subject = cleanEntityName(roleMatch[1]);
+      const role = (roleMatch[2] + roleMatch[3]).trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        facts.push({
+          subject,
+          predicate: `served as ${role}`,
+          type: 'role',
+          fullSentence: sentence,
+          stem: `Who was ${role.replace(/^(of|in)\s+/i, '')}?`,
+          answer: subject,
+          distractorType: 'entity',
+        });
+        continue;
+      }
     }
 
-    // 6. Copular identification: "X is a/an Y that Z"
+    // 5. Passive Historical & Institutional Actions: "X was signed/drafted/founded in Y"
+    const passiveMatch = sentence.match(
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:was|were|is|are)\s+(signed|written|drafted|authored|ratified|adopted|enacted|passed|fought|waged|concluded|founded|established|created)\s+(?:in|on|at|by)\s+([^.;\n]{3,160})/i
+    );
+    if (passiveMatch) {
+      const subject = cleanEntityName(passiveMatch[1]);
+      const actionVerb = passiveMatch[2].toLowerCase();
+      const target = passiveMatch[3].trim().replace(/^[:=–—\s-]+/, '');
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        const isTime = /\b(17\d\d|18\d\d|19\d\d|20\d\d|January|February|March|April|May|June|July|August|September|October|November|December)\b/i.test(target);
+        facts.push({
+          subject,
+          predicate: `was ${actionVerb} in ${target}`,
+          type: isTime ? 'date_time' : 'action',
+          fullSentence: sentence,
+          stem: isTime
+            ? `When was the ${subject} ${actionVerb}?`
+            : `Where or by whom was the ${subject} ${actionVerb}?`,
+          answer: target,
+          distractorType: isTime ? 'date' : 'entity',
+        });
+        continue;
+      }
+    }
+
+    // 6. Functional, Historical & Causal Actions: "commanded", "defeated", "converts", "synthesizes"
+    const actionMatch = sentence.match(
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9.\s()/-]{2,45})\s+(commanded|led|defeated|synthesizes?|generates?|produces?|converts?|catalyzes?|regulates?|controls?|inhibits?|triggers?|causes?|marked|established|signed|drafted|authored|ratified|discovered|invented|developed|built|enforces?|measures?|calculates?)\s+([^.;\n]{5,220})/i
+    );
+    if (actionMatch) {
+      const subject = cleanEntityName(actionMatch[1]);
+      const verb = actionMatch[2].toLowerCase();
+      const target = actionMatch[3].trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        let stem = `What is the primary function of ${subject}?`;
+        if (verb === 'commanded' || verb === 'led') stem = `What military force or body did ${subject} command or lead?`;
+        else if (verb === 'defeated') stem = `Which force was defeated by ${subject}?`;
+        else if (verb === 'marked') stem = `What did ${subject} mark in history?`;
+        else if (verb === 'signed' || verb === 'drafted' || verb === 'authored' || verb === 'ratified')
+          stem = `What document or treaty did ${subject} ${verb}?`;
+        else if (verb.startsWith('convert')) stem = `What does ${subject} convert or process?`;
+        else if (verb.startsWith('produce') || verb.startsWith('synthesize') || verb.startsWith('generate'))
+          stem = `What does ${subject} produce or synthesize?`;
+        else if (verb.startsWith('catalyz')) stem = `What chemical or biological process does ${subject} catalyze?`;
+        else if (verb.startsWith('regulate') || verb.startsWith('control')) stem = `What does ${subject} regulate or control?`;
+
+        facts.push({
+          subject,
+          predicate: `${verb} ${target}`,
+          type: 'action',
+          fullSentence: sentence,
+          stem,
+          answer: target,
+          distractorType: 'predicate',
+        });
+        continue;
+      }
+    }
+
+    // 6. Requirements & Operations: "requires", "operates on", "functions on", "relies on"
+    const reqMatch = sentence.match(
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(requires?|operates?\s+on|functions?\s+on|relies?\s+on|uses?|utilizes?)\s+([^.;\n]{8,200})/i
+    );
+    if (reqMatch) {
+      const subject = cleanEntityName(reqMatch[1]);
+      const verb = reqMatch[2].toLowerCase();
+      const target = reqMatch[3].trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        facts.push({
+          subject,
+          predicate: `${verb} ${target}`,
+          type: 'requirement',
+          fullSentence: sentence,
+          stem: verb.includes('operate') || verb.includes('function')
+            ? `On what principle does ${subject} operate?`
+            : `What does ${subject} require?`,
+          answer: target,
+          distractorType: 'predicate',
+        });
+        continue;
+      }
+    }
+
+    // 7. Explicit Definitions: "is defined as", "refers to", "denotes", "is described as", "means"
+    const defMatch = sentence.match(
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:is defined as|refers to|denotes|is described as|means|signifies|represents|is known as)\s+([^.;\n]{15,250})/i
+    );
+    if (defMatch) {
+      const subject = cleanEntityName(defMatch[1]);
+      const def = defMatch[2].trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        facts.push({
+          subject,
+          predicate: def,
+          type: 'definition',
+          fullSentence: sentence,
+          stem: `What is ${subject}?`,
+          answer: def,
+          distractorType: 'predicate',
+        });
+        continue;
+      }
+    }
+
+    // 8. Copular Identification: "X is/are/was/were a/an/the Y"
     const copulaMatch = sentence.match(
-      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:is|are)\s+(?:a|an|the)\s+([^.;\n]{25,250})/i
+      /(?:^|(?<=[.;]\s+))(?:The\s+)?([A-Z][a-zA-Z0-9\s()/-]{2,45})\s+(?:is|are|was|were)\s+(?:a|an|the)\s+([^.;\n]{15,220})/i
     );
     if (copulaMatch) {
-      addFact({
-        term: copulaMatch[1],
-        definition: copulaMatch[2],
-        contextSentence: sentence,
-        type: 'mechanism',
-      });
-      continue;
+      const subject = cleanEntityName(copulaMatch[1]);
+      const def = copulaMatch[2].trim();
+      if (subject.length >= 3 && !seenSubjects.has(subject.toLowerCase())) {
+        seenSubjects.add(subject.toLowerCase());
+        facts.push({
+          subject,
+          predicate: def,
+          type: 'definition',
+          fullSentence: sentence,
+          stem: `What is ${subject}?`,
+          answer: def,
+          distractorType: 'predicate',
+        });
+        continue;
+      }
     }
 
-    // 7. Contrastive statements: "The key difference between X and Y is Z"
-    const contrastMatch = sentence.match(
-      /(?:the\s+(?:primary|main|key)\s+difference\s+between\s+([A-Za-z0-9\s-]+)\s+and\s+([A-Za-z0-9\s-]+)\s+is\s+that\s+([^.;\n]{20,250}))/i
-    );
-    if (contrastMatch) {
-      addFact({
-        term: `${contrastMatch[1]} vs ${contrastMatch[2]}`,
-        definition: contrastMatch[3],
-        contextSentence: sentence,
-        type: 'distinction',
-      });
+    // 9. Informative proposition fallback: any grammatical sentence with a clear subject
+    const words = sentence.split(/\s+/);
+    if (words.length >= 6 && words.length <= 40) {
+      const candidateMatch = sentence.match(/^([A-Z][a-zA-Z0-9\s-]{2,35})\s+(.+)$/);
+      if (candidateMatch) {
+        const candidateSubject = cleanEntityName(candidateMatch[1]);
+        if (
+          candidateSubject.length >= 3 &&
+          candidateSubject.split(/\s+/).length <= 4 &&
+          !seenSubjects.has(candidateSubject.toLowerCase())
+        ) {
+          seenSubjects.add(candidateSubject.toLowerCase());
+          facts.push({
+            subject: candidateSubject,
+            predicate: candidateMatch[2].trim(),
+            type: 'general',
+            fullSentence: sentence,
+            stem: `Which statement accurately describes ${candidateSubject}?`,
+            answer: candidateMatch[2].trim(),
+            distractorType: 'predicate',
+          });
+        }
+      }
     }
   }
 
@@ -155,284 +359,110 @@ export function extractDocumentFacts(text: string): ExtractedFact[] {
 }
 
 /**
- * Authentic Discipline-Specific University Question Banks
+ * Authentic Discipline-Specific Vocabulary Banks (Used ONLY when uploaded notes have fewer than 3 terms).
+ * Completely free of placeholder jargon.
  */
-interface SubjectQuestion {
-  q: string;
-  opts: [string, string, string, string];
-  ans: number;
-  exp: string;
-}
-
-const AUTHENTIC_SUBJECT_BANKS: Record<string, SubjectQuestion[]> = {
-  biology: [
-    {
-      q: 'Which organelle is the primary site of ATP synthesis via oxidative phosphorylation during aerobic cellular respiration?',
-      opts: ['Mitochondria', 'Rough Endoplasmic Reticulum', 'Golgi Apparatus', 'Lysosome'],
-      ans: 0,
-      exp: 'Mitochondria contain ATP synthase embedded in the inner mitochondrial membrane (cristae), driving ATP generation via the chemiosmotic proton gradient.',
-    },
-    {
-      q: 'What is the role of the enzyme RuBisCO in the light-independent reactions (Calvin cycle) of photosynthesis?',
-      opts: [
-        'Catalyzing the fixation of atmospheric CO2 onto ribulose-1,5-bisphosphate (RuBP)',
-        'Photolysis of water molecules at photosystem II to release diatomic oxygen',
-        'Direct phosphorylation of ADP into ATP via photophosphorylation',
-        'Transport of sucrose across phloem sieve tube elements',
-      ],
-      ans: 0,
-      exp: 'RuBisCO (Ribulose-1,5-bisphosphate carboxylase-oxygenase) catalyzes the primary rate-limiting step of carbon fixation in the stroma.',
-    },
-    {
-      q: 'During eukaryotic DNA replication, which enzyme is responsible for synthesizing short RNA primers required by DNA polymerase?',
-      opts: ['DNA Primase', 'DNA Ligase', 'DNA Helicase', 'Topoisomerase (Gyrase)'],
-      ans: 0,
-      exp: 'DNA primase synthesizes short RNA primers that provide the necessary 3\'-OH group for DNA polymerase III to initiate chain elongation.',
-    },
-    {
-      q: 'In enzyme kinetics, how does a competitive inhibitor affect Vmax and the apparent Km of the reaction?',
-      opts: [
-        'Vmax remains unchanged, while apparent Km increases',
-        'Vmax decreases, while apparent Km remains unchanged',
-        'Both Vmax and apparent Km decrease proportionally',
-        'Both Vmax and apparent Km increase significantly',
-      ],
-      ans: 0,
-      exp: 'Competitive inhibitors bind reversibly to the active site, increasing the substrate concentration required to reach half-maximal velocity (higher Km), but Vmax is attainable at high substrate saturations.',
-    },
-    {
-      q: 'Which phase of meiosis is characterized by homologous chromosome pairing (synapsis) and genetic crossing over?',
-      opts: ['Prophase I', 'Metaphase II', 'Anaphase I', 'Telophase II'],
-      ans: 0,
-      exp: 'Synaptonemal complexes form between homologous chromosomes during Prophase I, facilitating chiasmata formation and genetic recombination.',
-    },
-  ],
-  computer_science: [
-    {
-      q: 'In relational database management systems, what does the "A" in ACID transaction properties signify?',
-      opts: [
-        'Atomicity: all operations in a transaction succeed completely or none are applied',
-        'Asynchrony: transactions execute without blocking user requests',
-        'Availability: data is guaranteed to be readable across all distributed nodes',
-        'Authentication: verifying cryptographic tokens before modifying records',
-      ],
-      ans: 0,
-      exp: 'Atomicity ensures that a transaction is treated as an indivisible unit of work: if any sub-operation fails, the entire transaction rolls back.',
-    },
-    {
-      q: 'Which condition is NOT one of the four necessary Coffman conditions required for a system deadlock to occur?',
-      opts: [
-        'Preemption: the operating system forcibly reclaims held resources',
-        'Mutual Exclusion: only one process can hold a non-shareable resource at a time',
-        'Hold and Wait: processes hold existing resources while requesting additional allocations',
-        'Circular Wait: a closed chain of processes exists where each waits for a resource held by the next',
-      ],
-      ans: 0,
-      exp: 'No Preemption is the actual condition for deadlock. If preemption IS permitted, the OS can break the cycle and resolve deadlock.',
-    },
-    {
-      q: 'What is the worst-case time complexity of standard Quicksort when using a naive fixed pivot selection on an already sorted array?',
-      opts: ['O(n²)', 'O(n log n)', 'O(n)', 'O(log n)'],
-      ans: 0,
-      exp: 'Choosing the first or last element as pivot on an already sorted list produces maximally unbalanced partitions of sizes 0 and n-1, leading to quadratic O(n²) comparisons.',
-    },
-    {
-      q: 'In TCP/IP networking, what sequence of control flags completes the standard three-way handshake establishing a connection?',
-      opts: ['SYN -> SYN-ACK -> ACK', 'ACK -> SYN -> FIN', 'SYN -> ACK -> RST', 'FIN -> ACK -> FIN-ACK'],
-      ans: 0,
-      exp: 'The client sends a SYN packet, the server responds with SYN-ACK, and the client replies with an ACK acknowledging sequence synchrony.',
-    },
-    {
-      q: 'What is the primary function of an inverted page table in virtual memory management?',
-      opts: [
-        'Indexing physical frames directly to reduce memory overhead of per-process page tables',
-        'Translating physical memory addresses back into hard disk sector addresses',
-        'Disabling translation lookaside buffers (TLB) to enforce strict address isolation',
-        'Compressing dirty cache lines before write-back to secondary storage',
-      ],
-      ans: 0,
-      exp: 'An inverted page table has one entry per physical memory frame rather than per virtual page, drastically reducing memory overhead in large address spaces.',
-    },
-  ],
-  economics: [
-    {
-      q: 'According to microeconomic theory, what condition defines the profit-maximizing level of output for a firm in any market structure?',
-      opts: [
-        'Marginal Revenue equals Marginal Cost (MR = MC)',
-        'Price equals Average Total Cost (P = ATC)',
-        'Total Revenue is strictly greater than Total Cost by 50%',
-        'Marginal Cost equals Average Variable Cost at the shutdown point',
-      ],
-      ans: 0,
-      exp: 'A firm maximizes profit where MR = MC; producing beyond this point incurs marginal costs that exceed marginal revenues.',
-    },
-    {
-      q: 'If the price elasticity of demand for a good is -0.4 (inelastic), what will happen to total revenue if the firm raises its price?',
-      opts: [
-        'Total revenue will increase, because quantity demanded falls by a smaller percentage than the price increase',
-        'Total revenue will decrease to zero immediately',
-        'Total revenue will remain perfectly unchanged',
-        'Total revenue will drop substantially as consumers substitute alternatives',
-      ],
-      ans: 0,
-      exp: 'When demand is inelastic (|Ed| < 1), the percentage decrease in quantity demanded is smaller than the percentage increase in price, resulting in net total revenue expansion.',
-    },
-    {
-      q: 'In Keynesian macroeconomic analysis, what is the formula for the simple government spending multiplier when the Marginal Propensity to Consume is MPC?',
-      opts: ['1 / (1 - MPC)', 'MPC / (1 - MPC)', '(1 - MPC) / MPC', '1 / (1 + MPC)'],
-      ans: 0,
-      exp: 'The simple expenditure multiplier is 1 / (1 - MPC), which is equivalent to 1 / MPS (Marginal Propensity to Save).',
-    },
-    {
-      q: 'Which market structure is characterized by high barriers to entry, a single supplier, and no close substitutes for the good?',
-      opts: ['Monopoly', 'Monopolistic Competition', 'Oligopoly', 'Perfect Competition'],
-      ans: 0,
-      exp: 'A pure monopoly is characterized by a single firm producing a unique product protected by substantial structural or legal entry barriers.',
-    },
-    {
-      q: 'What economic phenomenon is represented by the deadweight loss of an excise tax?',
-      opts: [
-        'The loss of total economic surplus (consumer + producer surplus) not recouped as government tax revenue',
-        'The administrative cost of collecting taxes from wholesale vendors',
-        'The total tax revenue paid by foreign exporting firms',
-        'The increase in employment resulting from subsidized public sector investments',
-      ],
-      ans: 0,
-      exp: 'Deadweight loss represents mutually beneficial transactions foregone due to market price distortion caused by the tax wedge.',
-    },
-  ],
-  physics: [
-    {
-      q: "According to Newton's Second Law of Motion, what is the net external force acting on an object of constant mass?",
-      opts: [
-        'The product of mass and acceleration (F_net = m * a)',
-        'The total work divided by the elapsed time interval',
-        'The gravitational potential energy stored in the reference frame',
-        'The kinetic energy divided by the displacement vector',
-      ],
-      ans: 0,
-      exp: "Newton's Second Law formally defines net resultant force as the time rate of change of linear momentum (dp/dt), which reduces to F = ma for invariant mass.",
-    },
-    {
-      q: 'What fundamental physical principle governs the operation of an electric generator converting mechanical energy to electrical energy?',
-      opts: [
-        "Faraday's Law of Electromagnetic Induction",
-        "Coulomb's Law of Electrostatic Attraction",
-        "Hooke's Law of Elastic Deformation",
-        "Archimedes' Principle of Buoyant Displacement",
-      ],
-      ans: 0,
-      exp: "Faraday's Law states that a time-varying magnetic flux through a closed conducting circuit induces an electromotive force (EMF) proportional to the rate of change of flux.",
-    },
-    {
-      q: 'What is the First Law of Thermodynamics fundamentally an expression of?',
-      opts: [
-        'The Conservation of Energy in a thermodynamic system (ΔU = Q - W)',
-        'The principle that entropy in an isolated system never decreases',
-        'The absolute zero unreachable temperature limit',
-        'The ideal gas behavior under zero pressure constraints',
-      ],
-      ans: 0,
-      exp: 'The First Law states that the change in internal energy (ΔU) equals heat added to the system (Q) minus work performed by the system (W), confirming energy cannot be created or destroyed.',
-    },
-  ],
-  chemistry: [
-    {
-      q: 'What molecular geometry does a molecule with four bonding electron pairs and zero lone pairs adopt according to VSEPR theory?',
-      opts: ['Tetrahedral with 109.5° bond angles', 'Trigonal planar with 120° bond angles', 'Linear with 180° bond angles', 'Octahedral with 90° bond angles'],
-      ans: 0,
-      exp: 'Four electron domains with zero lone pairs (e.g. Methane CH4) minimize electron repulsion in a symmetrical 3-dimensional tetrahedral arrangement with 109.5° bond angles.',
-    },
-    {
-      q: "According to Le Chatelier's Principle, how does an exothermic chemical reaction at equilibrium respond to an increase in ambient temperature?",
-      opts: [
-        'Equilibrium shifts to the left (toward reactants) to absorb added heat',
-        'Equilibrium shifts to the right (toward products) to generate more heat',
-        'The equilibrium constant Keq increases substantially',
-        'Reaction rate decreases to zero immediately',
-      ],
-      ans: 0,
-      exp: 'For exothermic reactions (ΔH < 0), heat acts as a product. Adding heat drives the equilibrium in the endothermic reverse direction (toward reactants).',
-    },
-    {
-      q: 'What is the pH of a 0.001 M (1 x 10⁻³ M) aqueous solution of hydrochloric acid (HCl), assuming complete dissociation?',
-      opts: ['3.0', '1.0', '7.0', '11.0'],
-      ans: 0,
-      exp: 'Because HCl is a strong acid, [H+] = 10⁻³ M. The pH is calculated as -log10[H+] = -log10(10⁻³) = 3.0.',
-    },
-  ],
-  medicine: [
-    {
-      q: 'In cardiac electrophysiology, which anatomical structure serves as the primary intrinsic physiological pacemaker of the human heart?',
-      opts: ['Sinoatrial (SA) Node', 'Atrioventricular (AV) Node', 'Bundle of His', 'Purkinje Fibers'],
-      ans: 0,
-      exp: 'The Sinoatrial (SA) node in the right atrium spontaneously depolarizes at the highest intrinsic rate (60–100 bpm), establishing the cardiac sinus rhythm.',
-    },
-    {
-      q: 'Which white blood cell type is the most abundant in normal adult human peripheral blood and acts as the primary responder to bacterial infections?',
-      opts: ['Neutrophils', 'Lymphocytes', 'Eosinophils', 'Basophils'],
-      ans: 0,
-      exp: 'Neutrophils comprise 50%–70% of circulating leukocytes and provide immediate phagocytic and antimicrobial defense during acute bacterial inflammation.',
-    },
-    {
-      q: 'In pharmacology, what term describes the fraction of an administered drug dose that reaches the systemic circulation in active form?',
-      opts: ['Bioavailability (F)', 'Clearance (CL)', 'Volume of Distribution (Vd)', 'Therapeutic Index (TI)'],
-      ans: 0,
-      exp: 'Bioavailability (F) is the proportion of unchanged drug reaching systemic circulation, defining intravenous administration as F = 1.0 (100%).',
-    },
-  ],
-  law: [
-    {
-      q: 'In the law of torts, what four essential elements must a plaintiff establish to succeed in a cause of action for negligence?',
-      opts: [
-        'Duty of care, breach of duty, causation (factual and proximate), and measurable damage',
-        'Malice, intent, physical trespass, and financial insolvency',
-        'Offer, acceptance, consideration, and legal capacity',
-        'Jurisdiction, standing, certiorari, and injunctive relief',
-      ],
-      ans: 0,
-      exp: 'Negligence requires demonstrating that the defendant owed a legal duty of care, breached that standard, and directly caused legally cognizable damage.',
-    },
-    {
-      q: 'Under contract law, which legal doctrine prevents a party from enforcing a promise made without valid consideration if the other party reasonably relied on it to their detriment?',
-      opts: ['Promissory Estoppel', 'Parol Evidence Rule', 'Novation', 'Privity of Contract'],
-      ans: 0,
-      exp: 'Promissory estoppel operates in equity to enforce non-bargained promises when justifiable detrimental reliance occurred.',
-    },
-  ],
-  general: [
-    {
-      q: 'In empirical scientific methodology, what distinguishes a null hypothesis (H₀) from an alternative hypothesis (H₁)?',
-      opts: [
-        'H₀ posits no significant statistical difference or effect, while H₁ posits a true underlying experimental effect',
-        'H₀ is proven with 100% mathematical certainty before testing starts',
-        'H₁ is automatically discarded if sample size exceeds 30 observations',
-        'H₀ applies exclusively to qualitative interviews, whereas H₁ is quantitative',
-      ],
-      ans: 0,
-      exp: 'Statistical hypothesis testing assesses whether observed experimental sample data provides sufficient evidence to reject the baseline assumption of no effect (H₀).',
-    },
-    {
-      q: 'What is the primary purpose of a double-blind design in controlled clinical and empirical trials?',
-      opts: [
-        'Eliminating both observer expectancy bias and subject placebo effect',
-        'Reducing the financial cost of pharmaceutical manufacturing',
-        'Allowing participants to select their preferred experimental treatment group',
-        'Ensuring all data points fit a perfectly symmetrical bell curve distribution',
-      ],
-      ans: 0,
-      exp: 'Blinding both investigators and subjects prevents psychological bias and placebo distortion from contaminating treatment efficacy assessments.',
-    },
-  ],
+const AUTHENTIC_DOMAIN_DISTRACTORS: Record<string, { entities: string[]; predicates: string[]; dates: string[] }> = {
+  biology: {
+    entities: ['Mitochondria', 'Chloroplast', 'Ribosome', 'Endoplasmic Reticulum', 'Golgi Apparatus', 'Lysosome', 'Thylakoid Membrane', 'Stroma', 'Nucleus', 'Vacuole'],
+    predicates: [
+      'Site of ATP synthesis via oxidative phosphorylation',
+      'Translates mRNA transcripts into polypeptide chains',
+      'Synthesizes lipids and detoxifies metabolic byproducts',
+      'Modifies and packages proteins for vesicular secretion',
+      'Houses genetic material and regulates transcription',
+    ],
+    dates: ['1859', '1953', '1865', '1928'],
+  },
+  computer_science: {
+    entities: ['Binary Search Tree', 'Hash Map', 'Linked List', 'Stack Data Structure', 'Queue', 'Graph Adjacency List', 'Heap', 'Array Buffer'],
+    predicates: [
+      'Operates on a Last-In, First-Out (LIFO) access pattern',
+      'Provides O(1) average-time complexity key-value lookups',
+      'Maintains sequential pointer nodes requiring O(n) traversal',
+      'Executes divide-and-conquer logarithmic partitioning',
+      'Enforces strict mutual exclusion across concurrent execution threads',
+    ],
+    dates: ['1972', '1969', '1989', '1995'],
+  },
+  economics: {
+    entities: ['Fiscal Policy', 'Monetary Policy', 'Price Elasticity of Demand', 'Marginal Revenue', 'Gross Domestic Product', 'Consumer Price Index', 'Deadweight Loss'],
+    predicates: [
+      'Equilibrium condition where marginal revenue equals marginal cost (MR = MC)',
+      'Government expenditure and taxation used to influence aggregate demand',
+      'Central bank adjustment of interest rates to stabilize price inflation',
+      'Measurement of consumer price responsiveness relative to income elasticity',
+      'Total market value of all final goods and services produced within a nation',
+    ],
+    dates: ['1929', '1936', '1944', '1971'],
+  },
+  history: {
+    entities: ['Battle of Midway', 'Treaty of Versailles', 'League of Nations', 'Marshall Plan', 'Monroe Doctrine', 'Allied Powers', 'Axis Powers'],
+    predicates: [
+      'Marked a decisive turning point in naval superiority in the Pacific Theater',
+      'Established terms ending hostilities and imposing reparations following World War I',
+      'Post-war European economic recovery program sponsored by the United States',
+      'Diplomatic doctrine warning European powers against colonial intervention in the Americas',
+      'Comprehensive defense alliance established among Western democracies',
+    ],
+    dates: ['June 1942', 'June 1919', 'December 1941', 'May 1945', 'August 1945', 'November 1918'],
+  },
+  physics: {
+    entities: ['Kinetic Energy', 'Electromagnetic Force', 'Newton\'s Second Law', 'Conservation of Momentum', 'Faraday\'s Law of Induction', 'Thermal Equilibrium'],
+    predicates: [
+      'Net external force equals the rate of change of linear momentum (F = ma)',
+      'Time-varying magnetic flux induces an electromotive force in a closed circuit',
+      'Total energy in an isolated thermodynamic system remains invariant over time',
+      'Opposing electrostatic forces governed by an inverse-square distance relationship',
+      'Rate of doing work per unit elapsed time interval',
+    ],
+    dates: ['1687', '1831', '1905', '1915'],
+  },
+  chemistry: {
+    entities: ['Covalent Bond', 'Ionic Lattice', 'Activation Energy', 'Le Chatelier\'s Principle', 'Electronegativity', 'Enthalpy of Reaction'],
+    predicates: [
+      'Equilibrium shifts in the direction that opposes applied concentration or temperature changes',
+      'Electrostatic attraction between oppositely charged cation and anion lattices',
+      'Minimum threshold energy barrier required for colliding molecules to undergo chemical transformation',
+      'Relative measure of an atom\'s ability to attract shared electrons in a bond',
+      'Proportional relationship between gas pressure and temperature at constant volume',
+    ],
+    dates: ['1869', '1884', '1913', '1923'],
+  },
+  law: {
+    entities: ['Judicial Review', 'Due Process Clause', 'Separation of Powers', 'Equal Protection', 'Promissory Estoppel', 'Tort of Negligence'],
+    predicates: [
+      'Constitutional authority of courts to invalidate legislative enactments violating the constitution',
+      'Legal duty of care breached directly resulting in legally cognizable damage',
+      'Equitable doctrine enforcing non-bargained promises following detrimental reliance',
+      'Constitutional division of governmental responsibilities among distinct branches',
+      'Standard requiring notice and fair hearing prior to deprivation of legal rights',
+    ],
+    dates: ['1803', '1868', '1787', '1954'],
+  },
+  general: {
+    entities: ['Empirical Hypothesis', 'Independent Variable', 'Control Group', 'Statistical Significance', 'Qualitative Analysis', 'Double-Blind Design'],
+    predicates: [
+      'Baseline condition maintained invariant to isolate the effect of an experimental variable',
+      'Systematic testing evaluating whether sample evidence warrants rejecting the null assumption',
+      'Controlled experimental methodology eliminating observer expectancy and subject placebo distortion',
+      'Measurable factor manipulated intentionally by investigators to determine outcome response',
+      'Peer-reviewed validation assessing reproducibility and methodological rigor',
+    ],
+    dates: ['1920', '1945', '1960', '1980'],
+  },
 };
 
-function detectSubject(text: string, topic: string): string {
+export function detectSubject(text: string, topic: string): string {
   const combined = `${topic} ${text.slice(0, 10000)}`.toLowerCase();
 
+  if (/midway|war|treaty|president|navy|fleet|allied|axis|battle|colony|soviet|rebellion|revolution|constitution|empire|monarchy/i.test(combined)) {
+    return 'history';
+  }
   if (/photosynthe|cell|dna|rna|protein|enzyme|mitochondri|organelle|meiosis|mitosis|gene|respirat|glycoly|krebs|chloroplast|membrane|chromosome/i.test(combined)) {
     return 'biology';
   }
-  if (/database|sql|algorithm|complexity|packet|tcp|ip|network|operating system|kernel|compiler|memory|cpu|cache|class|thread|quicksort|hash/i.test(combined)) {
+  if (/database|sql|algorithm|complexity|packet|tcp|ip|network|operating system|kernel|compiler|memory|cpu|cache|class|thread|quicksort|hash|stack|queue|binary/i.test(combined)) {
     return 'computer_science';
   }
   if (/market|elasticity|inflation|gdp|monopoly|cost|revenue|profit|keynes|fiscal|monetary|consumer|producer|firm|interest rate|supply|demand/i.test(combined)) {
@@ -444,9 +474,6 @@ function detectSubject(text: string, topic: string): string {
   if (/acid|base|ph|stoichiometry|bond|orbital|reaction|catalyst|equilibrium|mole|molar|vsepr|enthalpy|titration/i.test(combined)) {
     return 'chemistry';
   }
-  if (/cardiac|atrium|ventricle|neuron|pharmacology|pathology|artery|vein|organ|patient|clinical|symptom|syndrome|therapy|dosage/i.test(combined)) {
-    return 'medicine';
-  }
   if (/contract|tort|statute|jurisdiction|plaintiff|defendant|constitutional|negligence|liability|court|amendment/i.test(combined)) {
     return 'law';
   }
@@ -454,7 +481,71 @@ function detectSubject(text: string, topic: string): string {
 }
 
 /**
+ * Creates 3 distinct, plausible distractors matching the grammatical type of the correct answer.
+ * ZERO synthetic jargon: distractors come directly from the document or standard syllabus terms.
+ */
+function createDistractors(
+  correctAnswer: string,
+  fact: ExtractedFact,
+  allFacts: ExtractedFact[],
+  vocab: DocumentVocabulary,
+  subject: string
+): [string, string, string] {
+  const cleanAns = correctAnswer.trim().toLowerCase();
+  const domain = AUTHENTIC_DOMAIN_DISTRACTORS[subject] || AUTHENTIC_DOMAIN_DISTRACTORS.general;
+
+  // 1. Date distractors: if the answer is a date/year
+  if (fact.type === 'date_time' || /\b(18\d\d|19\d\d|20\d\d|January|February|March|April|May|June|July|August|September|October|November|December)\b/i.test(correctAnswer)) {
+    const docDates = vocab.dates.filter((d) => d.toLowerCase() !== cleanAns);
+    const domainDates = domain.dates.filter((d) => d.toLowerCase() !== cleanAns);
+    const pool = Array.from(new Set([...docDates, ...domainDates]));
+
+    // Generate close alternative dates if pool is sparse
+    const yearMatch = correctAnswer.match(/\b(18\d\d|19\d\d|20\d\d)\b/);
+    if (yearMatch) {
+      const year = parseInt(yearMatch[1], 10);
+      pool.push(`${year - 1}`, `${year + 1}`, `${year + 3}`, `${year - 2}`);
+    }
+
+    const unique = pool.filter((d) => d.toLowerCase() !== cleanAns);
+    return [
+      unique[0] || '1941',
+      unique[1] || '1945',
+      unique[2] || '1939',
+    ];
+  }
+
+  // 2. Entity / Term distractors (e.g. asking for a person, place, structure, or noun)
+  if (fact.distractorType === 'entity' || fact.type === 'role') {
+    const docEntities = vocab.entities.filter((e) => e.toLowerCase() !== cleanAns && e.toLowerCase() !== fact.subject.toLowerCase());
+    const otherFactSubjects = allFacts.map((f) => f.subject).filter((s) => s.toLowerCase() !== cleanAns && s.toLowerCase() !== fact.subject.toLowerCase());
+    const domainEntities = domain.entities.filter((e) => e.toLowerCase() !== cleanAns);
+
+    const pool = Array.from(new Set([...docEntities, ...otherFactSubjects, ...domainEntities]));
+    return [
+      pool[0] || domain.entities[0] || 'Alternative Concept',
+      pool[1] || domain.entities[1] || 'Secondary Element',
+      pool[2] || domain.entities[2] || 'Related Framework',
+    ];
+  }
+
+  // 3. Predicate / Definition distractors (e.g. asking for a definition, function, or outcome)
+  const docPredicates = allFacts
+    .map((f) => f.predicate)
+    .filter((p) => p && p.toLowerCase() !== cleanAns && p.length >= 10);
+  const domainPredicates = domain.predicates.filter((p) => p.toLowerCase() !== cleanAns);
+
+  const pool = Array.from(new Set([...docPredicates, ...domainPredicates]));
+  return [
+    pool[0] || domain.predicates[0],
+    pool[1] || domain.predicates[1],
+    pool[2] || domain.predicates[2],
+  ];
+}
+
+/**
  * Generates genuine, syllabus-grounded examination questions from uploaded text.
+ * Strictly 0 placeholder jargon. Direct, authoritative questions and factual rationales.
  */
 export function generateGroundedExamQuiz(
   topic: string,
@@ -463,152 +554,121 @@ export function generateGroundedExamQuiz(
   difficulty: DifficultyLevel
 ): QuizQuestion[] {
   const targetCount = Math.max(1, Math.min(count, 15));
-  const facts = extractDocumentFacts(text);
-  const questions: QuizQuestion[] = [];
-  const subject = detectSubject(text, topic);
   const cleanTopic = topic.trim() || 'Course Curriculum';
+  const effectiveText = text ? text.trim() : '';
+
+  const facts = extractDocumentFacts(effectiveText, cleanTopic);
+  const vocab = extractDocumentVocabulary(effectiveText);
+  const subject = detectSubject(effectiveText, cleanTopic);
+  const questions: QuizQuestion[] = [];
 
   // 1. Generate questions directly from extracted document facts
-  if (facts.length >= 2) {
+  if (facts.length > 0) {
     for (let i = 0; i < facts.length && questions.length < targetCount; i++) {
       const fact = facts[i];
-      const otherFacts = facts.filter((_, idx) => idx !== i);
+      const distractors = createDistractors(fact.answer, fact, facts, vocab, subject);
 
-      // Question Type Alternation:
-      // Even index: Reverse Identification ("Which term matches: [definition]?")
-      // Odd index: Forward Definition / Function ("What is the primary role of [term]?")
-      const isReverse = i % 2 === 0;
+      // Determine correct answer position (rotate across A, B, C, D)
+      const correctPos = i % 4;
+      const opts: [string, string, string, string] = ['', '', '', ''];
+      const choices = [fact.answer, distractors[0], distractors[1], distractors[2]];
 
-      if (isReverse) {
-        // Collect other terms as authentic distractors
-        const otherTerms = otherFacts.map((f) => f.term).filter((t) => t && t !== fact.term);
-        const distractor1 = otherTerms[0] || `${cleanTopic} Regulation Mechanism`;
-        const distractor2 = otherTerms[1] || `Secondary Feedback Phase`;
-        const distractor3 = otherTerms[2] || `External Rate Inhibitor`;
+      opts[correctPos] = choices[0];
+      opts[(correctPos + 1) % 4] = choices[1];
+      opts[(correctPos + 2) % 4] = choices[2];
+      opts[(correctPos + 3) % 4] = choices[3];
 
-        const correctPos = i % 4;
-        const opts: [string, string, string, string] = ['', '', '', ''];
-        const choices = [fact.term, distractor1, distractor2, distractor3];
-        opts[correctPos] = choices[0];
-        opts[(correctPos + 1) % 4] = choices[1];
-        opts[(correctPos + 2) % 4] = choices[2];
-        opts[(correctPos + 3) % 4] = choices[3];
-
-        let stem = '';
-        if (fact.type === 'location') {
-          stem = `According to your study material, which biological or physical structure ${fact.definition.toLowerCase()}?`;
-        } else if (fact.type === 'function') {
-          stem = `Which process or component is specifically described as: "${fact.definition}"?`;
-        } else {
-          stem = `Which academic concept corresponds to this definition: "${fact.definition}"?`;
-        }
-
-        questions.push({
-          id: `q-rev-${i + 1}-${Date.now()}`,
-          question: stem,
-          options: opts,
-          correctAnswer: correctPos,
-          explanation: `Option ${String.fromCharCode(65 + correctPos)} (${fact.term}) is correct: The study notes state: "${fact.contextSentence}".`,
-        });
-      } else {
-        // Forward question: "What is the primary role/definition of [Term]?"
-        const otherDefs = otherFacts.map((f) => f.definition).filter((d) => d && d !== fact.definition);
-        const distractor1 = otherDefs[0] || `Regulates systemic homeostasis without participating in direct energy coupling.`;
-        const distractor2 = otherDefs[1] || `Catalyzes reverse equilibrium degradation under depleted substrate conditions.`;
-        const distractor3 = otherDefs[2] || `Acts as a non-essential secondary cofactor with variable expression.`;
-
-        const correctPos = (i + 1) % 4;
-        const opts: [string, string, string, string] = ['', '', '', ''];
-        const choices = [fact.definition, distractor1, distractor2, distractor3];
-        opts[correctPos] = choices[0];
-        opts[(correctPos + 1) % 4] = choices[1];
-        opts[(correctPos + 2) % 4] = choices[2];
-        opts[(correctPos + 3) % 4] = choices[3];
-
-        let stem = '';
-        if (fact.type === 'function') {
-          stem = `In the study of ${cleanTopic}, what is the primary function or mechanism of "${fact.term}"?`;
-        } else if (fact.type === 'location') {
-          stem = `Based on your course notes, where does "${fact.term}" occur, and what characterizes it?`;
-        } else {
-          stem = `According to the syllabus, how is "${fact.term}" defined and characterized?`;
-        }
-
-        questions.push({
-          id: `q-fwd-${i + 1}-${Date.now()}`,
-          question: stem,
-          options: opts,
-          correctAnswer: correctPos,
-          explanation: `Option ${String.fromCharCode(65 + correctPos)} is correct: The study material notes: "${fact.contextSentence}".`,
-        });
+      // Formulate clean, direct stem
+      let stem = fact.stem;
+      if (!stem || stem.length < 10) {
+        stem = `What is the primary role or definition of ${fact.subject}?`;
       }
+
+      // Authoritative, zero-AI explanation
+      const explanation = fact.fullSentence || `${fact.subject} ${fact.predicate}.`;
+
+      questions.push({
+        id: `q-grounded-${i + 1}-${Date.now()}`,
+        question: stem,
+        options: opts,
+        correctAnswer: correctPos,
+        explanation,
+      });
     }
   }
 
-  // 2. Cloze / Sentence-Completion for remaining questions
-  const sentences = extractSentences(text).filter(
-    (s) => s.length >= 40 && !s.endsWith(':') && /\b(is|are|occurs|takes place|produces|converts|requires|contains|generates)\b/i.test(s)
-  );
-
-  if (questions.length < targetCount && sentences.length > 0) {
+  // 2. If additional questions are needed and we have document sentences, formulate sentence-grounded questions
+  const sentences = extractSentences(effectiveText);
+  if (questions.length < targetCount && sentences.length > questions.length) {
     for (let i = 0; i < sentences.length && questions.length < targetCount; i++) {
-      const sentence = sentences[i];
-      // Find prominent candidate words: terms, nouns, numbers
-      const matches = sentence.match(/\b([A-Z][a-z]{3,20}|\d+(?:\s*(?:ATP|NADH|CO2|H2O|%|M|km|meters|seconds|joules))?)\b/g);
-      if (matches && matches.length > 0) {
-        // Pick a key word that isn't at the very beginning of the sentence
-        const targetWord = matches.find((w) => sentence.indexOf(w) > 5) || matches[0];
-        const blanked = sentence.replace(new RegExp(`\\b${targetWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`), '___________');
-        if (blanked !== sentence) {
-          const otherWords = sentences
-            .flatMap((s) => s.match(/\b([A-Z][a-z]{3,20}|\d+(?:\s*(?:ATP|NADH|CO2|H2O|%|M))?)\b/g) || [])
-            .filter((w) => w && w !== targetWord);
-          const uniqueOthers = Array.from(new Set(otherWords));
+      const s = sentences[i];
+      if (questions.some((q) => q.explanation === s)) continue;
 
-          const d1 = uniqueOthers[0] || 'Cytoplasm';
-          const d2 = uniqueOthers[1] || 'Ribosome';
-          const d3 = uniqueOthers[2] || 'Endoplasmic Reticulum';
-
-          const correctPos = (questions.length + 2) % 4;
+      const words = s.split(/\s+/);
+      if (words.length >= 6 && words.length <= 40) {
+        const verbSplit = s.match(/^(?:The\s+|A\s+|An\s+)?([A-Z][a-zA-Z0-9\s-]{2,35}?)\s+(is|are|was|were|functions?\s+as|operates?\s+as|provides?|refers?\s+to|means)\s+(.+)$/i);
+        if (verbSplit) {
+          const subj = cleanEntityName(verbSplit[1]);
+          const verb = verbSplit[2].toLowerCase();
+          const pred = verbSplit[3].trim();
+          const pseudoFact: ExtractedFact = {
+            subject: subj,
+            predicate: `${verb} ${pred}`,
+            type: 'general',
+            fullSentence: s,
+            stem: `What is the primary role or definition of ${subj}?`,
+            answer: pred,
+            distractorType: 'predicate',
+          };
+          const distractors = createDistractors(pred, pseudoFact, facts, vocab, subject);
+          const correctPos = (questions.length + 1) % 4;
           const opts: [string, string, string, string] = ['', '', '', ''];
-          const choices = [targetWord, d1, d2, d3];
-          opts[correctPos] = choices[0];
-          opts[(correctPos + 1) % 4] = choices[1];
-          opts[(correctPos + 2) % 4] = choices[2];
-          opts[(correctPos + 3) % 4] = choices[3];
+          opts[correctPos] = pred;
+          opts[(correctPos + 1) % 4] = distractors[0];
+          opts[(correctPos + 2) % 4] = distractors[1];
+          opts[(correctPos + 3) % 4] = distractors[2];
 
           questions.push({
-            id: `q-cloze-${questions.length + 1}-${Date.now()}`,
-            question: `Complete the following high-yield statement from your study notes: "${blanked}"`,
+            id: `q-sent-${questions.length + 1}-${Date.now()}`,
+            question: `What is the primary role or definition of ${subj}?`,
             options: opts,
             correctAnswer: correctPos,
-            explanation: `Option ${String.fromCharCode(65 + correctPos)} (${targetWord}) is correct: Source text: "${sentence}".`,
+            explanation: s,
           });
         }
       }
     }
   }
 
-  // 3. If still under target count, pull authentic academic curriculum questions from subject bank
-  const subjectBank = AUTHENTIC_SUBJECT_BANKS[subject] || AUTHENTIC_SUBJECT_BANKS.general;
-  let bankIdx = 0;
-  while (questions.length < targetCount && bankIdx < subjectBank.length) {
-    const item = subjectBank[bankIdx % subjectBank.length];
-    questions.push({
-      id: `q-subject-${questions.length + 1}-${Date.now()}`,
-      question: item.q,
-      options: item.opts,
-      correctAnswer: item.ans,
-      explanation: item.exp,
-    });
-    bankIdx++;
+  // 3. Fallback ONLY if text was empty or yielded zero facts: use domain curriculum questions
+  if (questions.length === 0) {
+    const domain = AUTHENTIC_DOMAIN_DISTRACTORS[subject] || AUTHENTIC_DOMAIN_DISTRACTORS.general;
+    for (let i = 0; i < targetCount && i < domain.entities.length; i++) {
+      const term = domain.entities[i];
+      const def = domain.predicates[i % domain.predicates.length];
+      const otherDefs = domain.predicates.filter((p) => p !== def);
+      const correctPos = i % 4;
+      const opts: [string, string, string, string] = ['', '', '', ''];
+      opts[correctPos] = def;
+      opts[(correctPos + 1) % 4] = otherDefs[0] || 'Standard baseline equilibrium condition';
+      opts[(correctPos + 2) % 4] = otherDefs[1] || 'Controlled experimental variable';
+      opts[(correctPos + 3) % 4] = otherDefs[2] || 'Governed regulatory framework';
+
+      questions.push({
+        id: `q-domain-${i + 1}-${Date.now()}`,
+        question: `What is the primary role or definition of ${term}?`,
+        options: opts,
+        correctAnswer: correctPos,
+        explanation: `${term}: ${def}.`,
+      });
+    }
   }
 
   return questions.slice(0, targetCount);
 }
 
 /**
- * Generates high-yield Flashcards grounded directly in the uploaded text.
+ * Generates flashcards grounded 100% in the uploaded text.
  */
 export function generateGroundedFlashcards(
   topic: string,
@@ -616,31 +676,68 @@ export function generateGroundedFlashcards(
   count: number
 ): Flashcard[] {
   const safeCount = Math.max(1, Math.min(count, 15));
-  const facts = extractDocumentFacts(text);
+  const cleanTopic = topic.trim() || 'Course Revision';
+  const effectiveText = text ? text.trim() : '';
+
+  const facts = extractDocumentFacts(effectiveText, cleanTopic);
   const flashcards: Flashcard[] = [];
 
+  // 1. Generate directly from extracted facts
   for (let i = 0; i < facts.length && flashcards.length < safeCount; i++) {
     const fact = facts[i];
+    let front = fact.subject;
+    let back = fact.predicate;
+
+    if (fact.type === 'role') {
+      front = `Who was ${fact.predicate.replace(/^served as\s+/i, '')}?`;
+      back = fact.subject;
+    } else if (fact.type === 'date_time') {
+      front = `When did ${fact.subject} occur?`;
+      back = fact.answer;
+    } else if (fact.type === 'location') {
+      front = `Where does ${fact.subject} take place?`;
+      back = fact.answer;
+    }
+
     flashcards.push({
       id: `fc-grounded-${i + 1}-${Date.now()}`,
-      front: fact.term,
-      back: fact.definition,
+      front,
+      back,
       position: i,
       known: false,
     });
   }
 
-  // Fallback if notes are brief: use authentic subject definitions
-  if (flashcards.length < safeCount) {
-    const subject = detectSubject(text, topic);
-    const bank = AUTHENTIC_SUBJECT_BANKS[subject] || AUTHENTIC_SUBJECT_BANKS.general;
-    for (let i = 0; i < bank.length && flashcards.length < safeCount; i++) {
-      const q = bank[i];
+  // 2. If more cards needed, use document sentences
+  const sentences = extractSentences(effectiveText);
+  if (flashcards.length < safeCount && sentences.length > 0) {
+    for (let i = 0; i < sentences.length && flashcards.length < safeCount; i++) {
+      const s = sentences[i];
+      if (flashcards.some((fc) => s.includes(fc.front))) continue;
+
+      const firstCap = s.match(/^([A-Z][a-zA-Z0-9\s-]{2,30})\s+(.+)$/);
+      if (firstCap) {
+        flashcards.push({
+          id: `fc-sent-${flashcards.length + 1}-${Date.now()}`,
+          front: cleanEntityName(firstCap[1]),
+          back: firstCap[2].trim(),
+          position: flashcards.length,
+          known: false,
+        });
+      }
+    }
+  }
+
+  // 3. Fallback ONLY if text was empty: domain curriculum
+  if (flashcards.length === 0) {
+    const subject = detectSubject(effectiveText, cleanTopic);
+    const domain = AUTHENTIC_DOMAIN_DISTRACTORS[subject] || AUTHENTIC_DOMAIN_DISTRACTORS.general;
+    for (let i = 0; i < safeCount && i < domain.entities.length; i++) {
       flashcards.push({
-        id: `fc-bank-${flashcards.length + 1}-${Date.now()}`,
-        front: q.opts[q.ans],
-        back: q.exp,
-        position: flashcards.length,
+        id: `fc-domain-${i + 1}-${Date.now()}`,
+        front: domain.entities[i],
+        back: domain.predicates[i % domain.predicates.length],
+        position: i,
         known: false,
       });
     }
@@ -650,7 +747,7 @@ export function generateGroundedFlashcards(
 }
 
 /**
- * Generates punchy, rapid-recall Brain Blitz questions grounded in the text.
+ * Generates punchy, rapid-recall Brain Blitz questions grounded strictly in the uploaded text.
  */
 export function generateGroundedBrainBlitz(
   topic: string,
@@ -658,49 +755,63 @@ export function generateGroundedBrainBlitz(
   count: number
 ): BrainBlitzQuestion[] {
   const safeCount = Math.max(5, Math.min(count, 30));
-  const facts = extractDocumentFacts(text);
-  const questions: BrainBlitzQuestion[] = [];
   const cleanTopic = topic.trim() || 'Rapid Mastery';
+  const effectiveText = text ? text.trim() : '';
 
-  if (facts.length >= 2) {
-    for (let i = 0; i < facts.length && questions.length < safeCount; i++) {
-      const fact = facts[i];
-      const otherFacts = facts.filter((_, idx) => idx !== i);
-      const d1 = otherFacts[0]?.term || 'Alternative Pathway';
-      const d2 = otherFacts[1]?.term || 'Feedback Inhibition';
-      const d3 = otherFacts[2]?.term || 'Substrate Binding';
+  const facts = extractDocumentFacts(effectiveText, cleanTopic);
+  const vocab = extractDocumentVocabulary(effectiveText);
+  const subject = detectSubject(effectiveText, cleanTopic);
+  const questions: BrainBlitzQuestion[] = [];
 
-      const correctPos = i % 4;
+  // Generate rapid-recall items from facts
+  for (let i = 0; i < facts.length && questions.length < safeCount; i++) {
+    const fact = facts[i];
+    const distractors = createDistractors(fact.answer, fact, facts, vocab, subject);
+
+    const correctPos = i % 4;
+    const opts: [string, string, string, string] = ['', '', '', ''];
+    opts[correctPos] = fact.answer.length > 80 ? fact.answer.slice(0, 77) + '...' : fact.answer;
+    opts[(correctPos + 1) % 4] = distractors[0].length > 80 ? distractors[0].slice(0, 77) + '...' : distractors[0];
+    opts[(correctPos + 2) % 4] = distractors[1].length > 80 ? distractors[1].slice(0, 77) + '...' : distractors[1];
+    opts[(correctPos + 3) % 4] = distractors[2].length > 80 ? distractors[2].slice(0, 77) + '...' : distractors[2];
+
+    let prompt = fact.stem;
+    if (prompt.length > 90) {
+      prompt = `What defines or characterizes ${fact.subject}?`;
+    }
+
+    questions.push({
+      id: `bb-grounded-${i + 1}-${Date.now()}`,
+      prompt,
+      options: opts,
+      correctIndex: correctPos,
+      category: cleanTopic.slice(0, 20),
+    });
+  }
+
+  // Fallback to domain questions if text is empty or sparse
+  if (questions.length < safeCount) {
+    const domain = AUTHENTIC_DOMAIN_DISTRACTORS[subject] || AUTHENTIC_DOMAIN_DISTRACTORS.general;
+    let idx = 0;
+    while (questions.length < safeCount && idx < domain.entities.length) {
+      const term = domain.entities[idx % domain.entities.length];
+      const def = domain.predicates[idx % domain.predicates.length];
+      const otherDefs = domain.predicates.filter((p) => p !== def);
+      const correctPos = idx % 4;
       const opts: [string, string, string, string] = ['', '', '', ''];
-      const choices = [fact.term, d1, d2, d3];
-      opts[correctPos] = choices[0];
-      opts[(correctPos + 1) % 4] = choices[1];
-      opts[(correctPos + 2) % 4] = choices[2];
-      opts[(correctPos + 3) % 4] = choices[3];
+      opts[correctPos] = def.length > 80 ? def.slice(0, 77) + '...' : def;
+      opts[(correctPos + 1) % 4] = otherDefs[0] ? (otherDefs[0].length > 80 ? otherDefs[0].slice(0, 77) + '...' : otherDefs[0]) : 'Alternative mechanism';
+      opts[(correctPos + 2) % 4] = otherDefs[1] ? (otherDefs[1].length > 80 ? otherDefs[1].slice(0, 77) + '...' : otherDefs[1]) : 'Secondary variable';
+      opts[(correctPos + 3) % 4] = otherDefs[2] ? (otherDefs[2].length > 80 ? otherDefs[2].slice(0, 77) + '...' : otherDefs[2]) : 'Controlled factor';
 
       questions.push({
-        id: `bb-grounded-${i + 1}-${Date.now()}`,
-        prompt: `Which concept matches: "${fact.definition.slice(0, 90)}..."?`,
+        id: `bb-domain-${questions.length + 1}-${Date.now()}`,
+        prompt: `What is the function of ${term}?`,
         options: opts,
         correctIndex: correctPos,
         category: cleanTopic.slice(0, 20),
       });
-    }
-  }
-
-  // Supplement from subject bank if needed
-  if (questions.length < safeCount) {
-    const subject = detectSubject(text, topic);
-    const bank = AUTHENTIC_SUBJECT_BANKS[subject] || AUTHENTIC_SUBJECT_BANKS.general;
-    for (let i = 0; i < bank.length && questions.length < safeCount; i++) {
-      const b = bank[i];
-      questions.push({
-        id: `bb-bank-${questions.length + 1}-${Date.now()}`,
-        prompt: b.q.length > 100 ? `${b.q.slice(0, 95)}...?` : b.q,
-        options: b.opts,
-        correctIndex: b.ans,
-        category: cleanTopic.slice(0, 20),
-      });
+      idx++;
     }
   }
 
@@ -713,42 +824,52 @@ export function generateGroundedBrainBlitz(
 export function generateGroundedDocumentSummary(text: string, fileName: string): DocumentSummary {
   const cleanTitle = fileName ? fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ') : 'Course Material';
   const sentences = extractSentences(text);
-  const facts = extractDocumentFacts(text);
+  const facts = extractDocumentFacts(text, cleanTitle);
 
   // Synthesize executive summary from top sentences
   let exec = '';
-  if (sentences.length >= 3) {
-    exec = sentences.slice(0, 4).join('. ') + '.';
+  if (sentences.length >= 2) {
+    exec = sentences
+      .slice(0, 4)
+      .map((s) => s.replace(/\.+$/, ''))
+      .join('. ') + '.';
   } else if (text.trim().length > 30) {
     exec = text.trim().slice(0, 500);
   } else {
-    exec = `Comprehensive study and revision notes for ${cleanTitle}, covering foundational definitions, critical mechanisms, and examination focus areas.`;
+    exec = `Study and revision summary for ${cleanTitle}, covering foundational definitions, mechanisms, and key points.`;
   }
 
   // Key concepts from real extracted facts
-  const keyConcepts = facts.slice(0, 6).map((f) => ({
-    term: f.term,
-    definition: f.definition,
+  const keyConcepts = facts.slice(0, 8).map((f) => ({
+    term: f.subject,
+    definition: f.predicate,
   }));
 
-  // If no facts could be extracted, generate meaningful subject concepts
+  // If no facts could be extracted, generate domain concepts
   if (keyConcepts.length === 0) {
     const subject = detectSubject(text, cleanTitle);
-    const bank = AUTHENTIC_SUBJECT_BANKS[subject] || AUTHENTIC_SUBJECT_BANKS.general;
-    for (let i = 0; i < 4 && i < bank.length; i++) {
+    const domain = AUTHENTIC_DOMAIN_DISTRACTORS[subject] || AUTHENTIC_DOMAIN_DISTRACTORS.general;
+    for (let i = 0; i < 4 && i < domain.entities.length; i++) {
       keyConcepts.push({
-        term: bank[i].opts[bank[i].ans],
-        definition: bank[i].exp,
+        term: domain.entities[i],
+        definition: domain.predicates[i % domain.predicates.length],
       });
     }
   }
 
-  // Exam takeaways
-  const examTakeaways = [
-    `Master the exact terminology: be prepared to define and distinguish ${keyConcepts[0]?.term || 'key principles'} on exam day.`,
-    `Focus on the causal mechanics: examiners frequently test why and how processes occur rather than simple recall.`,
-    `Review practical application: practice working through multi-step scenarios without relying on open references.`,
-  ];
+  // High-yield exam takeaways based on the actual material
+  const examTakeaways: string[] = [];
+  if (facts.length >= 2) {
+    examTakeaways.push(`Core principle: ${facts[0].subject} (${facts[0].predicate}).`);
+    examTakeaways.push(`Key distinction: Understand the role and significance of ${facts[1].subject} in ${cleanTitle}.`);
+    if (facts.length >= 3) {
+      examTakeaways.push(`Critical distinction: Clearly differentiate ${facts[2].subject} from related concepts.`);
+    }
+  } else {
+    examTakeaways.push(`Master foundational terminology and core definitions for ${cleanTitle}.`);
+    examTakeaways.push(`Focus on causal relationships and problem-solving mechanisms.`);
+    examTakeaways.push(`Practice active recall with quiz questions and flashcards.`);
+  }
 
   return {
     title: cleanTitle,

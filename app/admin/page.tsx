@@ -21,6 +21,13 @@ import {
   Bell,
   Send,
   Laptop,
+  Download,
+  FileSpreadsheet,
+  Copy,
+  Check,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { AlertBanner } from '@/components/ui/AlertBanner';
 
@@ -38,6 +45,12 @@ export default function AdminPage() {
   const [isLockedOut, setIsLockedOut] = useState(false);
   const [testingAlert, setTestingAlert] = useState(false);
   const [alertNotice, setAlertNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Google Sheets integration state
+  const [testingSheet, setTestingSheet] = useState(false);
+  const [sheetNotice, setSheetNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [copiedScript, setCopiedScript] = useState(false);
+  const [showScriptGuide, setShowScriptGuide] = useState(false);
 
   const fetchAdminStats = async (token?: string) => {
     const activeToken = token || sessionStorage.getItem('lobex_admin_token');
@@ -106,32 +119,30 @@ export default function AdminPage() {
 
       const data = await res.json();
 
-      if (res.ok && data.success && data.token) {
+      if (res.ok && data.token) {
         sessionStorage.setItem('lobex_admin_token', data.token);
-        sessionStorage.setItem('lobex_admin_username', data.username || username.trim());
-        setActiveAdminUser(data.username || username.trim());
+        sessionStorage.setItem('lobex_admin_username', data.username);
         setIsAdminUnlocked(true);
-        setUsername('');
-        setPassword('');
+        setActiveAdminUser(data.username);
         setFailedAttempts(0);
         fetchAdminStats(data.token);
       } else {
-        const nextAttempts = failedAttempts + 1;
-        setFailedAttempts(nextAttempts);
-        if (nextAttempts >= 5) {
+        const newFailed = failedAttempts + 1;
+        setFailedAttempts(newFailed);
+        if (newFailed >= 5) {
           setIsLockedOut(true);
-          setErrorMsg('Too many invalid attempts. Access locked for 30 seconds.');
+          setErrorMsg('Security lockout triggered: 5 consecutive invalid authentication attempts. Try again in 60 seconds.');
           setTimeout(() => {
             setIsLockedOut(false);
             setFailedAttempts(0);
             setErrorMsg('');
-          }, 30000);
+          }, 60000);
         } else {
-          setErrorMsg(data.error || 'Access Denied: Invalid administrator username or secret password.');
+          setErrorMsg(data.error || 'Access denied: Invalid administrator credentials.');
         }
       }
-    } catch (err: any) {
-      setErrorMsg('Network error authenticating with administrator server.');
+    } catch (e: any) {
+      setErrorMsg(e.message || 'Network error verifying administrator authentication.');
     } finally {
       setIsSubmitting(false);
     }
@@ -141,8 +152,9 @@ export default function AdminPage() {
     sessionStorage.removeItem('lobex_admin_token');
     sessionStorage.removeItem('lobex_admin_username');
     setIsAdminUnlocked(false);
+    setUsername('');
+    setPassword('');
     setStatsData(null);
-    setErrorMsg('');
   };
 
   const handleUpdateReport = async (id: string, status: 'reviewed' | 'dismissed') => {
@@ -204,6 +216,126 @@ export default function AdminPage() {
     }
   };
 
+  const handleExportUsersCsv = () => {
+    const records = statsData?.recentLogins || [];
+    if (records.length === 0) {
+      setAlertNotice({
+        type: 'error',
+        text: 'No student activity records found to export.',
+      });
+      return;
+    }
+
+    const headers = [
+      'Timestamp (UTC)',
+      'Event Type',
+      'Email Address',
+      'Display Name',
+      'IP Address',
+      'Email Delivery',
+      'Device / Browser',
+    ];
+
+    const rows = records.map((r: any) => [
+      `"${r.formattedTime || r.timestamp}"`,
+      `"${r.event === 'signup' ? 'New Registration' : r.event === 'demo_access' ? 'Fast-Pass Demo' : 'Sign-In'}"`,
+      `"${r.email}"`,
+      `"${r.displayName || 'N/A'}"`,
+      `"${r.ip || '127.0.0.1'}"`,
+      `"${r.emailSent ? 'Delivered' : 'Audit Logged'}"`,
+      `"${(r.userAgent || '').replace(/"/g, '""')}"`,
+    ]);
+
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows.map((row: string[]) => row.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `lobex_study_users_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleTestSheetSync = async () => {
+    const activeToken = sessionStorage.getItem('lobex_admin_token');
+    if (!activeToken) return;
+
+    setTestingSheet(true);
+    setSheetNotice(null);
+    try {
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': activeToken,
+        },
+        body: JSON.stringify({ action: 'test_sheet' }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSheetNotice({
+          type: 'success',
+          text: data.statusMessage || 'Success! Test row posted to Google Sheets.',
+        });
+      } else {
+        setSheetNotice({
+          type: 'error',
+          text: data.error || 'Failed to sync with Google Sheet.',
+        });
+      }
+    } catch (e: any) {
+      setSheetNotice({
+        type: 'error',
+        text: e.message || 'Error communicating with Google Sheets webhook.',
+      });
+    } finally {
+      setTestingSheet(false);
+    }
+  };
+
+  const appsScriptCode = `function doPost(e) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    
+    // Auto-create header row if sheet is brand new
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow([
+        "Timestamp",
+        "Event",
+        "Email Address",
+        "Display Name",
+        "IP Address",
+        "Device / Browser"
+      ]);
+      sheet.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#0f172a").setFontColor("#ffffff");
+    }
+    
+    var data = JSON.parse(e.postData.contents);
+    sheet.appendRow([
+      data.timestamp || new Date().toISOString(),
+      data.event || "Signup",
+      data.email || "",
+      data.displayName || "N/A",
+      data.ip || "",
+      data.userAgent || ""
+    ]);
+    
+    return ContentService.createTextOutput(JSON.stringify({ status: "success" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}`;
+
+  const handleCopyScript = () => {
+    navigator.clipboard.writeText(appsScriptCode);
+    setCopiedScript(true);
+    setTimeout(() => setCopiedScript(false), 2500);
+  };
+
   // Locked Gate View
   if (!isAdminUnlocked) {
     return (
@@ -227,7 +359,7 @@ export default function AdminPage() {
                 htmlFor="admin-username"
                 className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5"
               >
-                Administrator Username
+                Admin Username
               </label>
               <input
                 id="admin-username"
@@ -239,8 +371,8 @@ export default function AdminPage() {
                   setErrorMsg('');
                 }}
                 disabled={isLockedOut || isSubmitting}
-                placeholder="Enter administrator ID"
-                className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900 text-slate-900 placeholder-slate-400 font-medium"
+                placeholder="Enter admin username"
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900 text-slate-900 placeholder-slate-400"
                 required
               />
             </div>
@@ -289,7 +421,7 @@ export default function AdminPage() {
             <button
               type="submit"
               disabled={isLockedOut || isSubmitting}
-              className="w-full py-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white font-bold rounded-xl text-sm transition-all shadow-md flex items-center justify-center gap-2 focus:outline-none focus-visible:ring-4 focus-visible:ring-slate-900/20"
+              className="w-full py-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white font-bold rounded-xl text-sm transition-all shadow-md flex items-center justify-center gap-2 focus:outline-none focus-visible:ring-4 focus-visible:ring-slate-900/20 cursor-pointer"
             >
               {isSubmitting ? (
                 <>
@@ -338,14 +470,14 @@ export default function AdminPage() {
           <button
             onClick={() => fetchAdminStats()}
             disabled={loading}
-            className="px-3.5 py-1.5 text-xs font-semibold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg flex items-center gap-1.5 transition-colors"
+            className="px-3.5 py-1.5 text-xs font-semibold text-slate-200 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             Refresh
           </button>
           <button
             onClick={handleSignOut}
-            className="px-3.5 py-1.5 text-xs font-semibold text-rose-300 hover:text-rose-100 bg-rose-950/60 hover:bg-rose-900 border border-rose-800/60 rounded-lg flex items-center gap-1.5 transition-colors"
+            className="px-3.5 py-1.5 text-xs font-semibold text-rose-300 hover:text-rose-100 bg-rose-950/60 hover:bg-rose-900 border border-rose-800/60 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <LogOut className="w-3.5 h-3.5" />
             Sign Out
@@ -380,34 +512,36 @@ export default function AdminPage() {
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center flex-shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center flex-shrink-0">
             <Mail className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-xs text-slate-500 font-semibold uppercase">Email Dispatch</span>
+            <span className="text-xs text-slate-500 font-semibold uppercase">Security Alerts Pipeline</span>
             <p className="text-sm font-bold text-slate-800 mt-0.5">
-              {statsData?.systemHealth?.emailService || 'Local Simulation Active'}
+              {statsData?.systemHealth?.emailService || 'Active'}
             </p>
           </div>
         </div>
       </div>
 
-      {/* Platform Aggregates */}
+      {/* Core Platform Counters */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
-        <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
-          Platform Activity Overview
-        </h2>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <h2 className="text-base font-bold text-slate-800">Platform Utilization Summary</h2>
+          <span className="text-xs text-slate-500 font-mono">Live In-Memory Counters</span>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-            <span className="text-xs text-slate-500 font-medium">Total Quizzes</span>
+            <span className="text-xs text-slate-500 font-medium">Registered Accounts</span>
             <p className="text-2xl font-black text-slate-900 mt-1">
-              {statsData?.platformMetrics?.totalQuizzesGenerated || 142}
+              {statsData?.platformMetrics?.registeredStudents || 24}
             </p>
           </div>
           <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
-            <span className="text-xs text-slate-500 font-medium">Flashcard Decks</span>
+            <span className="text-xs text-slate-500 font-medium">Quizzes Generated</span>
             <p className="text-2xl font-black text-slate-900 mt-1">
-              {statsData?.platformMetrics?.totalStudySets || 89}
+              {statsData?.platformMetrics?.totalQuizzesGenerated || 142}
             </p>
           </div>
           <div className="p-4 bg-slate-50 rounded-xl border border-slate-100">
@@ -423,7 +557,7 @@ export default function AdminPage() {
         </div>
       </div>
 
-      {/* Live User Login Telemetry & Email Alerts */}
+      {/* Live User Login Telemetry, CSV Export & Email Alerts */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
           <div className="flex items-center gap-3">
@@ -431,22 +565,29 @@ export default function AdminPage() {
               <Bell className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-slate-800">User Login Telemetry & Email Alerts</h2>
+              <h2 className="text-base font-bold text-slate-800">User Registrations & Security Telemetry</h2>
               <p className="text-xs text-slate-500">
-                Automatic security notifications dispatched when students register or sign in
+                Live stream of new signups, login events, and device details
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono bg-slate-100 text-slate-700 px-2.5 py-1.5 rounded-lg border border-slate-200">
-              Alerts: <strong>{statsData?.notificationPipeline?.adminEmail || 'lobithrift@gmail.com'}</strong>
-            </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleExportUsersCsv}
+              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+              title="Download all user registrations and signups as an Excel/CSV spreadsheet"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Export Spreadsheet (.CSV)</span>
+            </button>
+
             <button
               type="button"
               onClick={handleTriggerTestAlert}
               disabled={testingAlert}
-              className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+              className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
             >
               <Send className={`w-3.5 h-3.5 ${testingAlert ? 'animate-spin' : ''}`} />
               <span>{testingAlert ? 'Sending...' : 'Send Test Alert'}</span>
@@ -485,7 +626,7 @@ export default function AdminPage() {
                   <th className="py-2.5 px-3">Event</th>
                   <th className="py-2.5 px-3">Timestamp</th>
                   <th className="py-2.5 px-3">IP Address</th>
-                  <th className="py-2.5 px-3">Email Status</th>
+                  <th className="py-2.5 px-3">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -521,29 +662,125 @@ export default function AdminPage() {
                       {entry.ip}
                     </td>
                     <td className="py-3 px-3">
-                      <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold ${
-                          entry.emailSent
-                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : 'bg-slate-100 text-slate-600 border border-slate-200'
-                        }`}
-                      >
-                        {entry.emailSent ? (
-                          <>
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                            <span>Delivered</span>
-                          </>
-                        ) : (
-                          <>
-                            <span>Audit Logged</span>
-                          </>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold ${
+                            entry.emailSent
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : 'bg-slate-100 text-slate-600 border border-slate-200'
+                          }`}
+                        >
+                          {entry.emailSent ? 'Email Alert' : 'Logged'}
+                        </span>
+                        {entry.sheetSynced && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            Sheet Synced
+                          </span>
                         )}
-                      </span>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          )}
+        </div>
+      </div>
+
+      {/* Google Sheets Live Real-Time Integration Card */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold">
+              <FileSpreadsheet className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-800">Google Sheets Live Real-Time Webhook Sync</h2>
+              <p className="text-xs text-slate-500">
+                Automatically append new student signup rows to your Google Sheet in real time
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                statsData?.notificationPipeline?.googleSheetsWebhookConfigured
+                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                  : 'bg-amber-50 text-amber-800 border border-amber-200'
+              }`}
+            >
+              {statsData?.notificationPipeline?.googleSheetsWebhookConfigured
+                ? 'Webhook Connected'
+                : 'Webhook URL Needed in .env.local'}
+            </span>
+            <button
+              type="button"
+              onClick={handleTestSheetSync}
+              disabled={testingSheet}
+              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+            >
+              <Send className={`w-3.5 h-3.5 ${testingSheet ? 'animate-spin' : ''}`} />
+              <span>{testingSheet ? 'Testing...' : 'Send Test Row'}</span>
+            </button>
+          </div>
+        </div>
+
+        {sheetNotice && (
+          <div
+            className={`p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+              sheetNotice.type === 'success'
+                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                : 'bg-rose-50 text-rose-800 border border-rose-200'
+            }`}
+          >
+            {sheetNotice.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+            )}
+            <span>{sheetNotice.text}</span>
+          </div>
+        )}
+
+        <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 text-xs text-slate-600 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="font-bold text-slate-800">2-Minute Google Sheet Webhook Setup Guide:</span>
+            <button
+              type="button"
+              onClick={() => setShowScriptGuide(!showScriptGuide)}
+              className="text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer"
+            >
+              <span>{showScriptGuide ? 'Hide Code' : 'View / Copy Apps Script'}</span>
+              {showScriptGuide ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+
+          <ol className="list-decimal list-inside space-y-1.5 text-slate-600 leading-relaxed">
+            <li>Create a blank Google Sheet (e.g. <em>&quot;Lobex Study - Signups&quot;</em>).</li>
+            <li>In Google Sheets, click <strong>Extensions &gt; Apps Script</strong>.</li>
+            <li>Paste the 10-line script below into <code>Code.gs</code> and click <strong>Deploy &gt; New deployment</strong>.</li>
+            <li>Select <strong>Web app</strong>, choose <em>Execute as: Me</em> and <em>Who has access: Anyone</em>, then click <strong>Deploy</strong>.</li>
+            <li>Copy the resulting Web App URL and paste it as <code>GOOGLE_SHEETS_WEBHOOK_URL=your_url</code> in <code>.env.local</code>.</li>
+          </ol>
+
+          {showScriptGuide && (
+            <div className="mt-2 space-y-2">
+              <div className="flex items-center justify-between bg-slate-900 text-slate-300 px-3 py-1.5 rounded-t-lg text-[11px] font-mono">
+                <span>Google Apps Script (Code.gs)</span>
+                <button
+                  type="button"
+                  onClick={handleCopyScript}
+                  className="flex items-center gap-1 text-amber-300 hover:text-white transition-colors cursor-pointer"
+                >
+                  {copiedScript ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                  <span>{copiedScript ? 'Copied to Clipboard!' : 'Copy Script'}</span>
+                </button>
+              </div>
+              <pre className="p-3 bg-slate-950 text-slate-100 rounded-b-lg font-mono text-[11px] overflow-x-auto leading-relaxed border border-slate-800">
+                {appsScriptCode}
+              </pre>
+            </div>
           )}
         </div>
       </div>
@@ -602,14 +839,14 @@ export default function AdminPage() {
                     <button
                       type="button"
                       onClick={() => handleUpdateReport(report.id, 'dismissed')}
-                      className="px-3.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-medium"
+                      className="px-3.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-medium cursor-pointer"
                     >
                       Dismiss
                     </button>
                     <button
                       type="button"
                       onClick={() => handleUpdateReport(report.id, 'reviewed')}
-                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold"
+                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold cursor-pointer"
                     >
                       Mark Reviewed
                     </button>

@@ -138,6 +138,39 @@ export async function POST(req: NextRequest) {
       statusMessage = 'Saved to audit trail (Set RESEND_API_KEY in .env.local for live dispatch)';
     }
 
+    // 2. Google Sheets Webhook Dispatch (Automatic live spreadsheet sync)
+    const googleSheetWebhookUrl = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
+    let sheetSynced = false;
+
+    if (googleSheetWebhookUrl) {
+      try {
+        const sheetRes = await fetch(googleSheetWebhookUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            timestamp: formattedDate,
+            isoDate: timestamp,
+            event: eventTitle,
+            email,
+            displayName: displayName || 'N/A',
+            ip: clientIp,
+            userAgent: userAgent || 'Unknown Device',
+          }),
+        });
+
+        if (sheetRes.ok) {
+          sheetSynced = true;
+          console.log(`[GOOGLE SHEETS SYNC] Successfully recorded ${eventTitle} (${email}) to Google Sheet.`);
+        } else {
+          console.warn(`[GOOGLE SHEETS SYNC] Webhook returned status ${sheetRes.status}`);
+        }
+      } catch (sheetErr: any) {
+        console.warn('[GOOGLE SHEETS SYNC] Webhook dispatch warning:', sheetErr.message || sheetErr);
+      }
+    }
+
     // Always record in server-side audit store
     const record = addLoginAuditRecord({
       email,
@@ -147,14 +180,16 @@ export async function POST(req: NextRequest) {
       ip: clientIp,
       userAgent,
       emailSent,
+      sheetSynced,
       statusMessage,
     });
 
-    console.log(`[LOGIN NOTIFICATION PIPELINE] ${eventTitle} for ${email}. Email sent: ${emailSent}. Status: ${statusMessage}`);
+    console.log(`[LOGIN NOTIFICATION PIPELINE] ${eventTitle} for ${email}. Email sent: ${emailSent}. Sheet synced: ${sheetSynced}. Status: ${statusMessage}`);
 
     return NextResponse.json({
       success: true,
       emailSent,
+      sheetSynced,
       auditLogged: true,
       statusMessage,
       record,

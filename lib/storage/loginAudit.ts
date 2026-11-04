@@ -1,4 +1,4 @@
-﻿export interface LoginAuditRecord {
+export interface LoginAuditRecord {
   id: string;
   email: string;
   displayName?: string;
@@ -8,6 +8,7 @@
   ip: string;
   userAgent?: string;
   emailSent: boolean;
+  sheetSynced?: boolean;
   statusMessage: string;
 }
 

@@ -56,6 +56,7 @@ export async function GET(req: NextRequest) {
       adminEmail: adminNotificationEmail,
       fromEmail: process.env.EMAIL_FROM || 'onboarding@resend.dev',
       resendConfigured: hasResendKey,
+      googleSheetsWebhookConfigured: Boolean(process.env.GOOGLE_SHEETS_WEBHOOK_URL),
       status: hasResendKey ? 'Live Delivery Active' : 'Simulation & Audit Mode',
     },
     platformMetrics: {
@@ -219,6 +220,53 @@ export async function POST(req: NextRequest) {
         statusMessage,
         targetEmail,
       });
+    }
+
+    // 5. Trigger a test row to Google Sheet
+    if (body.action === 'test_sheet') {
+      const webhookUrl = process.env.GOOGLE_SHEETS_WEBHOOK_URL;
+      if (!webhookUrl) {
+        return NextResponse.json({
+          success: false,
+          error: 'GOOGLE_SHEETS_WEBHOOK_URL is not configured in .env.local yet. Please paste your Google Apps Script Web App URL.',
+        });
+      }
+
+      try {
+        const testPayload = {
+          timestamp: new Date().toLocaleString('en-US', { timeZone: 'UTC', dateStyle: 'full', timeStyle: 'long' }),
+          isoDate: new Date().toISOString(),
+          event: 'Admin Test Probe',
+          email: 'admin_test@lobex-study.internal',
+          displayName: 'Admin Test Student',
+          ip: req.headers.get('x-forwarded-for')?.split(',')[0].trim() || '127.0.0.1',
+          userAgent: req.headers.get('user-agent') || 'Admin Dashboard Probe',
+        };
+
+        const res = await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(testPayload),
+        });
+
+        if (res.ok) {
+          return NextResponse.json({
+            success: true,
+            statusMessage: 'Test row successfully posted to your Google Sheet!',
+          });
+        } else {
+          const errText = await res.text();
+          return NextResponse.json({
+            success: false,
+            error: `Google Sheets returned HTTP ${res.status}: ${errText.slice(0, 150)}`,
+          });
+        }
+      } catch (err: any) {
+        return NextResponse.json({
+          success: false,
+          error: `Failed to connect to Google Sheets Webhook: ${err.message || 'Unknown network error'}`,
+        });
+      }
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });

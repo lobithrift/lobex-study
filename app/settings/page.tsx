@@ -18,6 +18,7 @@ import { usePwa } from '@/components/pwa/PwaContext';
 import { ExplanationLevel } from '@/types';
 import { clearStoredSessions } from '@/lib/storage/planner';
 import { clearGameRecord } from '@/lib/storage/game';
+import { clearStoredFlashcardDecks } from '@/lib/storage/flashcards';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import { AlertBanner } from '@/components/ui/AlertBanner';
 
@@ -83,6 +84,14 @@ export default function SettingsPage() {
     if (confirm('Clear your Brain Blitz high scores from this device?')) {
       clearGameRecord();
       setClearedNotice('Brain Blitz high scores cleared from this browser.');
+      setTimeout(() => setClearedNotice(''), 3000);
+    }
+  };
+
+  const handleClearFlashcards = () => {
+    if (confirm('Clear your saved flashcard decks from this device?')) {
+      clearStoredFlashcardDecks();
+      setClearedNotice('Saved flashcard decks cleared from this browser.');
       setTimeout(() => setClearedNotice(''), 3000);
     }
   };
@@ -302,6 +311,15 @@ export default function SettingsPage() {
           >
             <Trash2 className="w-4 h-4 text-rose-500" />
             Reset Brain Blitz Scores
+          </button>
+
+          <button
+            type="button"
+            onClick={handleClearFlashcards}
+            className="px-4 py-2 border border-slate-200 hover:border-rose-300 hover:bg-rose-50 text-slate-700 hover:text-rose-700 font-semibold rounded-xl transition-colors flex items-center gap-1.5"
+          >
+            <Trash2 className="w-4 h-4 text-rose-500" />
+            Clear Saved Flashcard Decks
           </button>
 
           <button

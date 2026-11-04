@@ -11,7 +11,6 @@ import {
   AlertCircle,
   Plus,
   Trash2,
-  BookmarkCheck,
   Save,
   UploadCloud,
   FileText,
@@ -20,11 +19,23 @@ import {
   ChevronDown,
   ChevronUp,
   Paperclip,
+  FolderOpen,
+  Download,
+  X,
+  Cloud,
+  HardDrive,
+  Info,
+  Check,
 } from 'lucide-react';
 import { Flashcard } from '@/types';
-import { AlertBanner } from '@/components/ui/AlertBanner';
 import { getSupabaseBrowserClient } from '@/lib/supabase/client';
 import { extractEducationalFile, ExtractedFileResult } from '@/lib/utils/fileExtractor';
+import {
+  SavedFlashcardDeck,
+  getStoredFlashcardDecks,
+  saveFlashcardDeckLocally,
+  deleteStoredFlashcardDeck,
+} from '@/lib/storage/flashcards';
 
 export function FlashcardViewer() {
   const [topic, setTopic] = useState('Cell Organelles & Respiration');
@@ -78,11 +89,24 @@ export function FlashcardViewer() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [newFront, setNewFront] = useState('');
   const [newBack, setNewBack] = useState('');
-  const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Check transferred notes from Summarizer
+  // Storage & Decks Management State
+  const [savedDecks, setSavedDecks] = useState<SavedFlashcardDeck[]>([]);
+  const [currentDeckId, setCurrentDeckId] = useState<string | null>(null);
+  const [showDecksModal, setShowDecksModal] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveToast, setSaveToast] = useState<{
+    type: 'success' | 'info' | 'warning';
+    title: string;
+    message: string;
+  } | null>(null);
+
+  // Load saved decks and check transferred notes on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
+      const stored = getStoredFlashcardDecks();
+      setSavedDecks(stored);
+
       const transferredTopic = sessionStorage.getItem('lobex_flashcard_transfer_topic');
       const transferredNotes = sessionStorage.getItem('lobex_flashcard_transfer_notes');
       if (transferredTopic) {
@@ -226,6 +250,7 @@ export function FlashcardViewer() {
       setCards(data.flashcards);
       setCurrentIdx(0);
       setFilterNeedsReview(false);
+      setCurrentDeckId(null);
     } catch (err: any) {
       setError(err.message || 'Unable to generate flashcards.');
     } finally {
@@ -251,46 +276,149 @@ export function FlashcardViewer() {
     setShowAddModal(false);
   };
 
-  const handleSaveToCloud = async () => {
+  // Resilient Hybrid Save: Guarantees deck is saved to local storage first, then attempts Supabase sync
+  const handleSaveDeck = async () => {
+    if (cards.length === 0) {
+      setError('No flashcards in current deck to save.');
+      return;
+    }
+
+    setIsSaving(true);
+    const deckTitle = topic.trim() || 'Custom Flashcard Set';
+    const deckId = currentDeckId || `deck-${Date.now()}`;
+
+    // 1. Immediately persist locally so the student NEVER loses their work
+    const localRecord = saveFlashcardDeckLocally({
+      id: deckId,
+      title: deckTitle,
+      topic: topic.trim(),
+      notes: notes.trim(),
+      sourceType: notes ? 'notes' : 'topic',
+      cards,
+      syncedToCloud: false,
+      createdAt: new Date().toISOString(),
+    });
+
+    setCurrentDeckId(localRecord.id);
+    setSavedDecks(getStoredFlashcardDecks());
+
+    // 2. Attempt Supabase cloud sync gracefully
     try {
       const supabase = getSupabaseBrowserClient();
       const {
         data: { user },
+        error: userError,
       } = await supabase.auth.getUser();
 
-      if (!user) {
-        alert('Please sign in to save study sets to your cloud account.');
-        return;
+      if (user && !userError) {
+        // Insert or update study set
+        const { data: setRecord, error: setError } = await supabase
+          .from('study_sets')
+          .insert({
+            user_id: user.id,
+            title: deckTitle,
+            source_type: notes ? 'notes' : 'topic',
+          })
+          .select('id, title, user_id')
+          .maybeSingle();
+
+        if (setError) {
+          console.warn('Supabase study_sets sync notice:', setError);
+          setSaveToast({
+            type: 'info',
+            title: 'Saved to Local Library',
+            message: `Deck stored safely on this device. (Cloud notice: ${setError.message || 'Supabase access'})`,
+          });
+        } else if (setRecord?.id) {
+          const cardsToInsert = cards.map((c, i) => ({
+            study_set_id: setRecord.id,
+            front: c.front,
+            back: c.back,
+            position: i,
+          }));
+
+          const { error: cardsError } = await supabase.from('flashcards').insert(cardsToInsert);
+          if (cardsError) {
+            console.warn('Supabase flashcards insert notice:', cardsError);
+            setSaveToast({
+              type: 'info',
+              title: 'Saved to Local Library',
+              message: `Deck is safe on this device. Card sync notice: ${cardsError.message}`,
+            });
+          } else {
+            // Update local record to synced
+            saveFlashcardDeckLocally({
+              ...localRecord,
+              syncedToCloud: true,
+              cloudSetId: setRecord.id,
+              updatedAt: new Date().toISOString(),
+            });
+            setSavedDecks(getStoredFlashcardDecks());
+
+            setSaveToast({
+              type: 'success',
+              title: 'Saved to Cloud & Synced!',
+              message: 'Your revision deck is securely saved to your Supabase account and local library.',
+            });
+          }
+        }
+      } else {
+        // Guest or demo user
+        setSaveToast({
+          type: 'info',
+          title: 'Saved to Local Library!',
+          message: 'Flashcards saved safely on this device. Sign in anytime to sync across devices.',
+        });
       }
-
-      // 1. Insert study set
-      const { data: setRecord, error: setError } = await supabase
-        .from('study_sets')
-        .insert({
-          user_id: user.id,
-          title: topic || 'Custom Flashcard Set',
-          source_type: notes ? 'notes' : 'topic',
-        })
-        .select()
-        .single();
-
-      if (setError || !setRecord) throw setError;
-
-      // 2. Insert flashcards
-      const cardsToInsert = cards.map((c, i) => ({
-        study_set_id: setRecord.id,
-        front: c.front,
-        back: c.back,
-        position: i,
-      }));
-
-      await supabase.from('flashcards').insert(cardsToInsert);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 2500);
-    } catch (err) {
-      console.error(err);
-      alert('Could not save flashcards to Supabase. Check your connection or sign-in status.');
+    } catch (err: any) {
+      console.warn('Supabase sync skipped (offline or network interrupted):', err);
+      setSaveToast({
+        type: 'info',
+        title: 'Saved to Local Library!',
+        message: 'Offline or connection interrupted. Your flashcards are safely stored on this computer.',
+      });
+    } finally {
+      setIsSaving(false);
+      setTimeout(() => {
+        setSaveToast(null);
+      }, 4000);
     }
+  };
+
+  const handleLoadDeck = (deck: SavedFlashcardDeck) => {
+    setCards(deck.cards);
+    setTopic(deck.topic || deck.title);
+    setNotes(deck.notes || '');
+    setCurrentDeckId(deck.id);
+    setCurrentIdx(0);
+    setIsFlipped(false);
+    setFilterNeedsReview(false);
+    setShowDecksModal(false);
+
+    setSaveToast({
+      type: 'success',
+      title: 'Deck Loaded',
+      message: `Loaded "${deck.title}" with ${deck.cards.length} flashcards.`,
+    });
+    setTimeout(() => setSaveToast(null), 3000);
+  };
+
+  const handleDeleteDeck = (deckId: string) => {
+    deleteStoredFlashcardDeck(deckId);
+    setSavedDecks(getStoredFlashcardDecks());
+    if (currentDeckId === deckId) {
+      setCurrentDeckId(null);
+    }
+  };
+
+  const handleExportDeck = (deck: SavedFlashcardDeck) => {
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(deck, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', dataStr);
+    downloadAnchor.setAttribute('download', `${deck.title.toLowerCase().replace(/\s+/g, '_')}_flashcards.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
   };
 
   const knownCount = cards.filter((c) => c.known).length;
@@ -298,6 +426,40 @@ export function FlashcardViewer() {
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
+      {/* Save / Feedback Toast */}
+      {saveToast && (
+        <div
+          className={`p-4 rounded-2xl border shadow-sm flex items-start justify-between gap-3 transition-all ${
+            saveToast.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+              : saveToast.type === 'warning'
+              ? 'bg-amber-50 border-amber-200 text-amber-950'
+              : 'bg-blue-50 border-blue-200 text-blue-950'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            {saveToast.type === 'success' ? (
+              <CheckCircle className="w-5 h-5 text-emerald-600 mt-0.5 flex-shrink-0" />
+            ) : saveToast.type === 'warning' ? (
+              <AlertCircle className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+            ) : (
+              <Info className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
+            )}
+            <div>
+              <p className="text-sm font-bold">{saveToast.title}</p>
+              <p className="text-xs opacity-90 mt-0.5 leading-relaxed">{saveToast.message}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSaveToast(null)}
+            className="p-1 hover:bg-black/5 rounded-lg transition-colors flex-shrink-0"
+          >
+            <X className="w-4 h-4 opacity-60 hover:opacity-100" />
+          </button>
+        </div>
+      )}
+
       {/* Top Generator / Controls Card */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 sm:p-8">
         <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-100">
@@ -313,19 +475,34 @@ export function FlashcardViewer() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
+              type="button"
+              onClick={() => setShowDecksModal(true)}
+              className="px-3.5 py-2 text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center gap-2 transition-colors cursor-pointer"
+            >
+              <FolderOpen className="w-4 h-4 text-slate-600" />
+              <span>My Decks ({savedDecks.length})</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setShowAddModal(true)}
-              className="px-4 py-2 text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center gap-2 transition-colors"
+              className="px-3.5 py-2 text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center gap-2 transition-colors cursor-pointer"
             >
               <Plus className="w-4 h-4" /> Add Card
             </button>
             <button
-              onClick={handleSaveToCloud}
-              className="px-4 py-2 text-sm font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl flex items-center gap-2 transition-colors"
+              type="button"
+              onClick={handleSaveDeck}
+              disabled={isSaving || cards.length === 0}
+              className="px-4 py-2 text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 rounded-xl flex items-center gap-2 transition-colors shadow-2xs cursor-pointer"
             >
-              <Save className="w-4 h-4" />
-              {saveSuccess ? 'Saved to Account!' : 'Save Deck'}
+              {isSaving ? (
+                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Save className="w-4 h-4" />
+              )}
+              <span>{isSaving ? 'Saving...' : 'Save Deck'}</span>
             </button>
           </div>
         </div>
@@ -365,7 +542,7 @@ export function FlashcardViewer() {
               <button
                 type="submit"
                 disabled={isLoading || !topic.trim()}
-                className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 text-white font-semibold text-sm sm:text-base rounded-xl flex items-center justify-center gap-2 shadow-2xs transition-colors"
+                className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-200 text-white font-semibold text-sm sm:text-base rounded-xl flex items-center justify-center gap-2 shadow-2xs transition-colors cursor-pointer"
               >
                 {isLoading ? (
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -475,7 +652,7 @@ export function FlashcardViewer() {
                     <button
                       type="button"
                       onClick={handleRemoveFile}
-                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
                       title="Remove file"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -572,7 +749,7 @@ export function FlashcardViewer() {
               <button
                 type="button"
                 onClick={() => toggleStatus(currentCard.id, false)}
-                className={`px-3.5 py-2 text-sm font-semibold rounded-xl border flex items-center gap-1.5 transition-colors ${
+                className={`px-3.5 py-2 text-sm font-semibold rounded-xl border flex items-center gap-1.5 transition-colors cursor-pointer ${
                   !currentCard.known
                     ? 'bg-amber-50 text-amber-900 border-amber-300 ring-2 ring-amber-300/30'
                     : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -585,7 +762,7 @@ export function FlashcardViewer() {
               <button
                 type="button"
                 onClick={() => toggleStatus(currentCard.id, true)}
-                className={`px-3.5 py-2 text-sm font-semibold rounded-xl border flex items-center gap-1.5 transition-colors ${
+                className={`px-3.5 py-2 text-sm font-semibold rounded-xl border flex items-center gap-1.5 transition-colors cursor-pointer ${
                   currentCard.known
                     ? 'bg-emerald-50 text-emerald-900 border-emerald-300 ring-2 ring-emerald-300/30'
                     : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
@@ -601,7 +778,7 @@ export function FlashcardViewer() {
               <button
                 type="button"
                 onClick={handlePrev}
-                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors"
+                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer"
                 title="Previous card (Left Arrow)"
                 aria-label="Previous card"
               >
@@ -611,7 +788,7 @@ export function FlashcardViewer() {
               <button
                 type="button"
                 onClick={handleShuffle}
-                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors"
+                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer"
                 title="Shuffle cards"
                 aria-label="Shuffle cards"
               >
@@ -621,7 +798,7 @@ export function FlashcardViewer() {
               <button
                 type="button"
                 onClick={handleNext}
-                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors"
+                className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer"
                 title="Next card (Right Arrow)"
                 aria-label="Next card"
               >
@@ -638,7 +815,7 @@ export function FlashcardViewer() {
                   setCurrentIdx(0);
                   setIsFlipped(false);
                 }}
-                className={`px-3.5 py-2 text-sm font-semibold rounded-xl border transition-colors ${
+                className={`px-3.5 py-2 text-sm font-semibold rounded-xl border transition-colors cursor-pointer ${
                   filterNeedsReview
                     ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
                     : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -657,7 +834,7 @@ export function FlashcardViewer() {
           </p>
           <button
             onClick={() => setFilterNeedsReview(false)}
-            className="px-4 py-2 bg-indigo-600 text-white text-xs font-semibold rounded-lg"
+            className="px-4 py-2 bg-indigo-600 text-white text-xs font-semibold rounded-lg cursor-pointer"
           >
             View All Cards
           </button>
@@ -684,7 +861,7 @@ export function FlashcardViewer() {
                   onChange={(e) => setNewFront(e.target.value)}
                   placeholder="e.g. Newton's 1st Law"
                   required
-                  className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-violet-600 focus:outline-none"
+                  className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-slate-900 focus:outline-none"
                 />
               </div>
 
@@ -698,7 +875,7 @@ export function FlashcardViewer() {
                   placeholder="e.g. An object remains at rest or uniform velocity unless acted upon by a resultant external force."
                   rows={3}
                   required
-                  className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-violet-600 focus:outline-none"
+                  className="w-full text-xs p-2.5 rounded-lg border border-slate-300 focus:ring-2 focus:ring-slate-900 focus:outline-none"
                 />
               </div>
 
@@ -706,18 +883,145 @@ export function FlashcardViewer() {
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
-                  className="px-3.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
+                  className="px-3.5 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 text-xs font-semibold bg-violet-600 hover:bg-violet-700 text-white rounded-lg shadow-sm"
+                  className="px-4 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg shadow-sm cursor-pointer"
                 >
                   Add Card
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Saved Decks Modal Drawer */}
+      {showDecksModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-800 flex items-center justify-center font-bold">
+                  <FolderOpen className="w-5 h-5 text-slate-700" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">Saved Study Decks</h3>
+                  <p className="text-xs text-slate-500">
+                    {savedDecks.length} deck{savedDecks.length === 1 ? '' : 's'} stored on this device & cloud
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDecksModal(false)}
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto py-4 space-y-3 pr-1">
+              {savedDecks.length === 0 ? (
+                <div className="text-center py-12 px-4 space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                    <Layers className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-slate-800">No Saved Decks Yet</p>
+                    <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                      Generate or add flashcards, then click &quot;Save Deck&quot; to keep them in your study library.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                savedDecks.map((deck) => (
+                  <div
+                    key={deck.id}
+                    className={`p-4 rounded-xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                      currentDeckId === deck.id
+                        ? 'bg-slate-50/80 border-slate-400 ring-2 ring-slate-900/10'
+                        : 'bg-white border-slate-200 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="space-y-1.5 flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="font-bold text-slate-900 text-sm truncate">{deck.title}</h4>
+                        {deck.syncedToCloud ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                            <Cloud className="w-3 h-3" /> Cloud Synced
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded-full border border-slate-200">
+                            <HardDrive className="w-3 h-3" /> Device Stored
+                          </span>
+                        )}
+                        {currentDeckId === deck.id && (
+                          <span className="text-[11px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">
+                            Active In Viewer
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3 text-xs text-slate-500">
+                        <span>{deck.cardCount || deck.cards.length} cards</span>
+                        <span>•</span>
+                        <span>{new Date(deck.updatedAt || deck.createdAt).toLocaleDateString()}</span>
+                        {deck.sourceType && (
+                          <>
+                            <span>•</span>
+                            <span className="capitalize">{deck.sourceType} based</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-auto flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleLoadDeck(deck)}
+                        className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                      >
+                        <RotateCw className="w-3.5 h-3.5" />
+                        <span>Study Deck</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportDeck(deck)}
+                        className="p-1.5 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                        title="Export Deck (JSON)"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteDeck(deck.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                        title="Delete Deck"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
+              <span className="text-xs text-slate-500">
+                Decks are preserved offline in browser storage and synchronized to Supabase when signed in.
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowDecksModal(false)}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}
